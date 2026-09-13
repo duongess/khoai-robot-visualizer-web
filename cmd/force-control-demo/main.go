@@ -2,96 +2,84 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"errors"
 	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	framework "github.com/duongess/khoai-robot-control-framework/pkg/framework"
+	"github.com/duongess/khoai-robot-visualizer-web/pkg"
 	"github.com/duongess/khoai-robot-visualizer-web/pkg/forcecontrol"
 )
 
-const stepCount = 100
-
 func main() {
-	ctx := context.Background()
-	learner, err := framework.NewLearnerClient(ctx)
-	if err != nil {
-		log.Fatalf("connect to learner: %v", err)
-	}
-	defer learner.Close()
-
-	ready, err := learner.HealthCheck(ctx)
-	if err != nil {
-		log.Fatalf("check learner health: %v", err)
-	}
-	if !ready {
-		log.Fatal("learner is not ready")
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	environment := forcecontrol.New(42)
-	state := environment.Reset()
+	environment.Reset()
 
-	for step := 1; step <= stepCount; step++ {
-		actions, err := learner.PredictBatch(ctx, []framework.State{stateToFramework(state)})
-		if err != nil {
-			log.Fatalf("predict action at step %d: %v", step, err)
+	uiHandler, err := pkg.NewUIHandler()
+	if err != nil {
+		log.Fatalf("initialize embedded frontend: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/", apiHandler(environment))
+	// Reserve the WebSocket route so it cannot be handled by the SPA fallback.
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "WebSocket telemetry is not configured", http.StatusNotImplemented)
+	})
+	mux.Handle("/", uiHandler)
+
+	address := os.Getenv("FORCE_CONTROL_ADDR")
+	if address == "" {
+		address = "127.0.0.1:8080"
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("start HTTP server on %s: %v", address, err)
+	}
+	server := &http.Server{Handler: mux}
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- server.Serve(listener) }()
+	log.Printf("SwarmDex visualizer is running at http://%s", address)
+
+	select {
+	case <-ctx.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			log.Printf("shut down HTTP server: %v", err)
 		}
-		if len(actions) != 1 || len(actions[0]) != 1 {
-			log.Fatalf("predict action at step %d: expected one grip action", step)
-		}
-
-		result, err := environment.Step(forcecontrol.Action{NormalizedGripForce: float64(actions[0][0])})
-		if err != nil {
-			log.Fatalf("apply action at step %d: %v", step, err)
-		}
-
-		reward := rewardFor(result.Outcome)
-		_, err = learner.TrainBatch(ctx, []framework.Transition{{
-			Observation:     stateToFramework(state),
-			Action:          actions[0],
-			Reward:          reward,
-			NextObservation: stateToFramework(result.State),
-			Done:            result.Done,
-		}})
-		if err != nil {
-			log.Fatalf("train transition at step %d: %v", step, err)
-		}
-
-		fmt.Printf(
-			"step=%d grip_force=%.2f required_force=%.2f reward=%.2f outcome=%s\n",
-			step,
-			result.State.CurrentGripForce,
-			result.RequiredForce,
-			reward,
-			result.Outcome,
-		)
-
-		state = result.State
-		if result.Done {
-			state = environment.Reset()
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP server failed: %v", err)
 		}
 	}
 }
 
-func stateToFramework(state forcecontrol.State) framework.State {
-	return framework.State{
-		float32(state.Mass),
-		float32(state.FrictionCoefficient),
-		float32(state.VerticalAcceleration),
-		float32(state.CurrentGripForce),
-		float32(state.BreakForce),
-		float32(state.SlipVelocity),
-	}
+func apiHandler(_ *forcecontrol.Environment) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/status" {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
+			return
+		}
+		if r.URL.Path == "/api/scene" && r.Method == http.MethodPut {
+			writeJSON(w, http.StatusOK, map[string]any{"success": true})
+			return
+		}
+		http.NotFound(w, r)
+	})
 }
 
-func rewardFor(outcome forcecontrol.Outcome) float32 {
-	switch outcome {
-	case forcecontrol.OutcomeStable:
-		return 1
-	case forcecontrol.OutcomeSlip:
-		return -1
-	case forcecontrol.OutcomeBreak:
-		return -10
-	default:
-		return 0
-	}
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }

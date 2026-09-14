@@ -3,7 +3,17 @@ import { useSimulationStore } from '../../lib/simulation-store';
 import { ShieldCheck, AlertTriangle, AlertOctagon, Layers, Cpu, Zap, Activity } from 'lucide-react';
 import { TaskPhase } from '../../types/simulation';
 
-const TASK_PHASE_LABELS: Record<TaskPhase, { step: number; label: string; desc: string }> = {
+const TASK_PHASE_LABELS: Partial<Record<TaskPhase, { step: number; label: string; desc: string }>> = {
+  idle: { step: 0, label: 'Idle', desc: 'Awaiting episode reset' },
+  approach_object: { step: 1, label: 'Approach Object', desc: 'Move the carriage over the object' },
+  lower_to_object: { step: 2, label: 'Lower to Object', desc: 'Lower the gripper to grasp height' },
+  grip_object: { step: 3, label: 'Grip Object', desc: 'Apply sufficient safe grip force' },
+  lift_object: { step: 4, label: 'Lift Object', desc: 'Raise the held object to clearance' },
+  move_to_target: { step: 5, label: 'Move to Target', desc: 'Carry the held object to the drop zone' },
+  lower_at_target: { step: 6, label: 'Lower at Target', desc: 'Lower the held object onto the target' },
+  release_object: { step: 7, label: 'Release Object', desc: 'Release only inside the target zone' },
+  success: { step: 7, label: 'Success', desc: 'Object placed in target zone' },
+  failure: { step: 0, label: 'Failure', desc: 'Episode ended due to a safety condition or timeout' },
   approach_horizontal: { step: 1, label: 'Move Above Object', desc: 'Carriage aligning over package' },
   lower: { step: 2, label: 'Lower Gripper', desc: 'Lowering shaft toward object' },
   open: { step: 3, label: 'Open Gripper', desc: 'Expanding jaws for capture' },
@@ -40,14 +50,15 @@ export const PhysicsMetrics: React.FC = () => {
   const mass = obj?.mass ?? draftConfig.object.mass;
   const friction = obj?.friction ?? draftConfig.object.friction;
   const objectStatus = obj?.status ?? 'idle';
-  const taskPhase: TaskPhase = worker?.task_phase ?? 'approach_horizontal';
-  const phaseInfo = TASK_PHASE_LABELS[taskPhase] || { step: 1, label: taskPhase, desc: '' };
+  const taskPhase: TaskPhase = worker?.task_phase ?? 'idle';
+  const phaseInfo = TASK_PHASE_LABELS[taskPhase] || { step: 0, label: taskPhase, desc: '' };
 
   // Runtime Metrics
-  const currentReward = worker?.last_reward ?? 1.45;
-  const successRate = runtime?.success_rate ?? (selectedMode === 'swarm' ? 0.942 : 0.748);
-  const policyVersion = runtime?.policy_version ?? 184;
-  const stepsPerSec = runtime?.steps_per_second ?? (runtimeStatus === 'running' ? (selectedMode === 'swarm' ? 32420 : 4120) : 0);
+  const currentReward = worker?.last_reward ?? 0;
+  const successRate = runtime?.success_rate ?? 0;
+  const policyVersion = runtime?.policy_version ?? 0;
+  const stepsPerSec = runtime?.steps_per_second ?? 0;
+  const runtimeError = runtime?.last_error;
 
   // Safety state evaluation according to Section 5 rules
   let forceState: 'stable' | 'slipping' | 'break_risk' = 'stable';
@@ -96,7 +107,7 @@ export const PhysicsMetrics: React.FC = () => {
           className="bg-slate-950 border border-slate-800/80 rounded-md p-2.5 space-y-1"
         >
           <div className="flex items-center justify-between text-[11px]">
-            <span className="text-slate-400 font-mono">Phase {phaseInfo.step}/10:</span>
+            <span className="text-slate-400 font-mono">Phase {phaseInfo.step}/7:</span>
             <span className="font-mono font-semibold text-cyan-300">{phaseInfo.label}</span>
           </div>
           <p className="text-[10px] text-slate-400 leading-tight font-mono">{phaseInfo.desc}</p>
@@ -128,6 +139,12 @@ export const PhysicsMetrics: React.FC = () => {
             <div className="font-bold text-slate-200 mt-0.5">{gripperY.toFixed(2)} m</div>
           </div>
         </div>
+
+        {runtimeError && (
+          <div className="mt-2 rounded border border-red-500/40 bg-red-500/10 p-2 font-mono text-[10px] text-red-300">
+            Runtime error: {runtimeError}
+          </div>
+        )}
       </div>
 
       {/* 2. Force Control Information & Formula */}

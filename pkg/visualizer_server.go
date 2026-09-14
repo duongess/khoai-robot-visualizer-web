@@ -218,22 +218,40 @@ func (s *APIServer) telemetry() map[string]any {
 		}
 		carriageX, gripperY := denormalize(get(0), config.WorldMinX, config.WorldMaxX), denormalize(get(1), config.WorldMinY, config.WorldMaxY)
 		objectX, objectY := denormalize(get(4), config.WorldMinX, config.WorldMaxX), denormalize(get(5), config.WorldMinY, config.WorldMaxY)
-		grasped := get(10) > 0
-		status := "idle"
-		if selected.Outcome == framework.OutcomeSuccess {
-			status = "placed"
-		} else if selected.Outcome == framework.OutcomeFailure {
-			status = "broken"
-		} else if grasped {
-			status = "grasped"
-		}
+		phase := forcecontrol.PhaseFromNormalized(float32(get(19)))
+		status := objectStatus(phase, get(15) > 0)
 		lastAction := []float32{0, 0, 0}
 		if len(selected.LastAction) == 3 {
 			lastAction = selected.LastAction
 		}
-		worker = map[string]any{"id": selected.ID, "episode_id": selected.EpisodeID, "episode_step": selected.EpisodeStep, "task_phase": status, "gantry": map[string]any{"carriage_x": carriageX, "gripper_y": gripperY, "grip_force": denormalize(get(3), 0, config.MaxGripForce), "jaw_opening": (get(2) + 1) / 2, "rail_y": config.WorldMaxY}, "object": map[string]any{"id": "object-1", "position": map[string]any{"x": objectX, "y": objectY}, "velocity": map[string]any{"x": denormalize(get(6), -config.MaxHorizontalSpeed, config.MaxHorizontalSpeed), "y": denormalize(get(7), -2*config.MaxVerticalSpeed, 2*config.MaxVerticalSpeed)}, "mass": denormalize(get(15), 0, 10), "friction": denormalize(get(16), 0, 1), "break_force": denormalize(get(17), 0, config.MaxGripForce), "required_grip_force": requiredForce(config), "safety_margin": denormalize(get(3), 0, config.MaxGripForce) - requiredForce(config), "status": status}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}, "terrain": map[string]any{"points": s.sceneConfig()["terrain"].(map[string]any)["points"]}, "last_action": map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "normalized_grip_force": lastAction[2]}, "last_reward": selected.LastReward, "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome}
+		gripForce := denormalize(get(16), 0, config.MaxGripForce)
+		worker = map[string]any{"id": selected.ID, "episode_id": selected.EpisodeID, "episode_step": selected.EpisodeStep, "task_phase": phase.String(), "gantry": map[string]any{"carriage_x": carriageX, "gripper_y": gripperY, "grip_force": gripForce, "jaw_opening": 1 - (get(14)+1)/2, "rail_y": config.WorldMaxY}, "object": map[string]any{"id": "object-1", "position": map[string]any{"x": objectX, "y": objectY}, "velocity": map[string]any{"x": denormalize(get(6), -config.MaxHorizontalSpeed, config.MaxHorizontalSpeed), "y": denormalize(get(7), -2*config.Gravity, 2*config.Gravity)}, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": denormalize(get(18), 0, config.MaxGripForce), "required_grip_force": denormalize(get(17), 0, config.MaxGripForce), "safety_margin": gripForce - denormalize(get(17), 0, config.MaxGripForce), "status": status}, "target": map[string]any{"position_x": denormalize(get(8), config.WorldMinX, config.WorldMaxX), "position_y": denormalize(get(9), config.WorldMinY, config.WorldMaxY), "width": config.TargetWidth}, "terrain": map[string]any{"points": s.sceneConfig()["terrain"].(map[string]any)["points"]}, "last_action": map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "normalized_grip_force": lastAction[2]}, "last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": math.Hypot(carriageX-objectX, gripperY-objectY), "distance_to_target": math.Hypot(objectX-denormalize(get(8), config.WorldMinX, config.WorldMaxX), objectY-denormalize(get(9), config.WorldMinY, config.WorldMaxY)), "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome}
 	}
-	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": 0, "episodes_per_second": 0, "total_steps": snapshot.TotalSteps, "success_rate": snapshot.SuccessRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy}, "worker": worker}
+	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": snapshot.StepsPerSecond, "episodes_per_second": snapshot.EpisodesPerSecond, "total_steps": snapshot.TotalSteps, "success_rate": snapshot.SuccessRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy, "last_error": snapshot.LastError}, "worker": worker}
+}
+
+func objectStatus(phase forcecontrol.Phase, grasped bool) string {
+	switch phase {
+	case forcecontrol.PhaseSuccess:
+		return "placed"
+	case forcecontrol.PhaseFailure:
+		return "broken"
+	case forcecontrol.PhaseLiftObject:
+		return "lifting"
+	case forcecontrol.PhaseMoveToTarget, forcecontrol.PhaseLowerAtTarget:
+		return "carrying"
+	case forcecontrol.PhaseReleaseObject:
+		return "releasing"
+	case forcecontrol.PhaseGripObject:
+		return "grasping"
+	case forcecontrol.PhaseApproachObject, forcecontrol.PhaseLowerToObject:
+		return "targeted"
+	default:
+		if grasped {
+			return "grasped"
+		}
+		return "idle"
+	}
 }
 
 func (s *APIServer) writeJSON(w http.ResponseWriter, status int, value any) {

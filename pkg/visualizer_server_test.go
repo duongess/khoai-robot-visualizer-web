@@ -50,6 +50,16 @@ func TestAPIServerRejectsRunningSceneUpdatesAndPublishesTelemetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(300 * time.Millisecond)
+	live := server.telemetry()
+	runtimeTelemetry := live["runtime"].(map[string]any)
+	if runtimeTelemetry["steps_per_second"].(float64) <= 0 {
+		t.Fatalf("live steps_per_second = %#v", runtimeTelemetry["steps_per_second"])
+	}
+	workerTelemetry := live["worker"].(map[string]any)
+	if workerTelemetry["task_phase"] == "idle" {
+		t.Fatalf("reset task phase remained idle: %#v", workerTelemetry)
+	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, "/api/scene", nil)
 	server.APIHandler().ServeHTTP(recorder, request)

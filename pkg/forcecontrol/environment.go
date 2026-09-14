@@ -2,31 +2,109 @@ package forcecontrol
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 )
 
-const observationDimension = 19
+// ObservationDimension is the fixed goal-conditioned policy input size.
+const ObservationDimension = 20
 
-// State is the physical state of the pick-and-place environment.
+const (
+	observationGripperX = iota
+	observationGripperY
+	observationGripperVelocityX
+	observationGripperVelocityY
+	observationObjectX
+	observationObjectY
+	observationObjectVelocityX
+	observationObjectVelocityY
+	observationTargetX
+	observationTargetY
+	observationObjectFromGripperX
+	observationObjectFromGripperY
+	observationTargetFromObjectX
+	observationTargetFromObjectY
+	observationGripperClosed
+	observationObjectGripped
+	observationGripForce
+	observationRequiredGripForce
+	observationBreakForce
+	observationPhase
+)
+
+// Phase describes progress through one policy-controlled pick-and-place episode.
+type Phase int
+
+const (
+	PhaseIdle Phase = iota
+	PhaseApproachObject
+	PhaseLowerToObject
+	PhaseGripObject
+	PhaseLiftObject
+	PhaseMoveToTarget
+	PhaseLowerAtTarget
+	PhaseReleaseObject
+	PhaseSuccess
+	PhaseFailure
+)
+
+func (p Phase) String() string {
+	switch p {
+	case PhaseApproachObject:
+		return "approach_object"
+	case PhaseLowerToObject:
+		return "lower_to_object"
+	case PhaseGripObject:
+		return "grip_object"
+	case PhaseLiftObject:
+		return "lift_object"
+	case PhaseMoveToTarget:
+		return "move_to_target"
+	case PhaseLowerAtTarget:
+		return "lower_at_target"
+	case PhaseReleaseObject:
+		return "release_object"
+	case PhaseSuccess:
+		return "success"
+	case PhaseFailure:
+		return "failure"
+	default:
+		return "idle"
+	}
+}
+
+// PhaseFromNormalized decodes the phase value exposed in an observation.
+func PhaseFromNormalized(value float32) Phase {
+	phase := int(math.Round((float64(value) + 1) * float64(PhaseFailure) / 2))
+	if phase < int(PhaseIdle) || phase > int(PhaseFailure) {
+		return PhaseIdle
+	}
+	return Phase(phase)
+}
+
+// State is the authoritative physical and task state for one environment.
 type State struct {
-	CarriageX        float64
-	GripperY         float64
-	GripperOpening   float64
-	GripForce        float64
-	ObjectX          float64
-	ObjectY          float64
-	ObjectVelocityX  float64
-	ObjectVelocityY  float64
-	ObjectMass       float64
-	ObjectFriction   float64
-	ObjectBreakForce float64
-	TargetX          float64
-	TargetY          float64
-	ObjectGrasped    bool
-	ObjectBroken     bool
-	ObjectPlaced     bool
-	EpisodeStep      int
+	CarriageX         float64
+	GripperY          float64
+	CarriageVelocityX float64
+	GripperVelocityY  float64
+	GripperOpening    float64
+	GripForce         float64
+	ObjectX           float64
+	ObjectY           float64
+	ObjectVelocityX   float64
+	ObjectVelocityY   float64
+	ObjectMass        float64
+	ObjectFriction    float64
+	ObjectBreakForce  float64
+	TargetX           float64
+	TargetY           float64
+	ObjectGrasped     bool
+	ObjectBroken      bool
+	ObjectPlaced      bool
+	Phase             Phase
+	EpisodeStep       int
 }
 
 // Environment owns all mutable state for one independent task instance.
@@ -36,6 +114,10 @@ type Environment struct {
 	random *rand.Rand
 	state  State
 	ready  bool
+
+	gripBonusAwarded bool
+	wasEverGrasped   bool
+	failureReason    string
 }
 
 func newEnvironment(seed int64, config Config) *Environment {
@@ -56,8 +138,9 @@ func (e *Environment) reset() State {
 		ObjectBreakForce: e.config.ObjectBreakForce,
 		TargetX:          e.config.TargetX,
 		TargetY:          e.terrainHeight(e.config.TargetX),
+		Phase:            PhaseApproachObject,
 	}
-	e.ready = true
+	e.gripBonusAwarded, e.wasEverGrasped, e.failureReason, e.ready = false, false, "", true
 	return e.state
 }
 
@@ -65,15 +148,12 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	if !e.ready {
 		return State{}, 0, OutcomeRunning, false, errors.New("force-control environment must be reset before stepping")
 	}
-	if len(action) != 3 {
-		return State{}, 0, OutcomeRunning, false, errors.New("force-control action must contain exactly three values")
+	values, err := e.validatedAction(action)
+	if err != nil {
+		return State{}, 0, OutcomeRunning, false, err
 	}
-	values := [3]float64{}
-	for i, value := range action {
-		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-			return State{}, 0, OutcomeRunning, false, errors.New("force-control action must contain only finite values")
-		}
-		values[i] = clamp(float64(value), -1, 1)
+	if e.state.Phase == PhaseSuccess || e.state.Phase == PhaseFailure {
+		return e.state, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
 	}
 
 	previous := e.state
@@ -81,32 +161,59 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.applyVerticalControl(values[1])
 	e.applyGripControl(values[2])
 	e.updateGraspState()
+	if e.state.ObjectGrasped {
+		e.wasEverGrasped = true
+	}
 	e.updateObjectPhysics()
 	e.resolveTerrainCollision()
-	e.clampPositions()
 	e.state.EpisodeStep++
 
-	outcome := OutcomeRunning
-	done := false
-	reward := e.reward(previous)
-	if e.state.ObjectBroken {
-		outcome, done, reward = OutcomeFailure, true, reward+e.config.Reward.BreakPenalty
-	} else if e.state.ObjectPlaced {
-		outcome, done, reward = OutcomeSuccess, true, reward+e.config.Reward.PlacementReward
-	} else if e.objectOutOfBounds() {
-		outcome, done, reward = OutcomeFailure, true, reward+e.config.Reward.DropPenalty
-	} else if e.state.EpisodeStep >= e.config.MaxEpisodeSteps {
-		outcome, done, reward = OutcomeFailure, true, reward+e.config.Reward.DropPenalty
+	terminalReason := e.detectFailure(previous)
+	if terminalReason != "" {
+		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
+		reward := e.reward(previous) + e.failurePenalty(terminalReason)
+		return e.state, reward, OutcomeFailure, true, nil
 	}
-	return e.state, reward, outcome, done, nil
+	e.updatePhase(previous)
+	if e.state.Phase == PhaseSuccess {
+		return e.state, e.reward(previous) + e.config.Reward.SuccessfulPlacement, OutcomeSuccess, true, nil
+	}
+	return e.state, e.reward(previous), OutcomeRunning, false, nil
+}
+
+func (e *Environment) validatedAction(action []float32) ([3]float64, error) {
+	if len(action) != 3 {
+		return [3]float64{}, errors.New("force-control action must contain exactly three values")
+	}
+	values := [3]float64{}
+	for index, value := range action {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return [3]float64{}, errors.New("force-control action must contain only finite values")
+		}
+		values[index] = clamp(float64(value), -1, 1)
+		if math.Abs(values[index]) < e.config.ActionDeadZone {
+			values[index] = 0
+		}
+	}
+	return values, nil
 }
 
 func (e *Environment) applyHorizontalControl(value float64) {
-	e.state.CarriageX += value * e.config.MaxHorizontalSpeed * e.config.TimeStep
+	e.state.CarriageVelocityX = value * e.config.MaxHorizontalSpeed
+	next := e.state.CarriageX + e.state.CarriageVelocityX*e.config.TimeStep
+	e.state.CarriageX = clamp(next, e.config.WorldMinX, e.config.WorldMaxX)
+	if e.state.CarriageX != next {
+		e.state.CarriageVelocityX = 0
+	}
 }
 
 func (e *Environment) applyVerticalControl(value float64) {
-	e.state.GripperY += value * e.config.MaxVerticalSpeed * e.config.TimeStep
+	e.state.GripperVelocityY = value * e.config.MaxVerticalSpeed
+	next := e.state.GripperY + e.state.GripperVelocityY*e.config.TimeStep
+	e.state.GripperY = clamp(next, e.config.WorldMinY, e.config.WorldMaxY)
+	if e.state.GripperY != next {
+		e.state.GripperVelocityY = 0
+	}
 }
 
 func (e *Environment) applyGripControl(value float64) {
@@ -116,25 +223,25 @@ func (e *Environment) applyGripControl(value float64) {
 
 func (e *Environment) updateGraspState() {
 	required := e.requiredForce()
-	horizontalOverlap := math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.ObjectWidth
-	verticalClose := math.Abs(e.state.GripperY-(e.state.ObjectY+e.config.ObjectHeight/2)) <= e.config.ObjectHeight
+	horizontalOverlap := math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance
+	verticalClose := math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance
 	canGrasp := horizontalOverlap && verticalClose && e.state.GripperOpening <= 0.35 && e.state.GripForce >= required
-	if e.state.GripForce >= e.state.ObjectBreakForce {
-		e.state.ObjectBroken = true
-		e.state.ObjectGrasped = false
+	if e.state.GripForce > e.state.ObjectBreakForce {
+		e.state.ObjectBroken, e.state.ObjectGrasped = true, false
 		return
 	}
 	if e.state.ObjectGrasped && e.state.GripForce < required {
 		e.state.ObjectGrasped = false
-	} else if !e.state.ObjectGrasped && canGrasp {
+		return
+	}
+	if !e.state.ObjectGrasped && canGrasp {
 		e.state.ObjectGrasped = true
 	}
 }
 
 func (e *Environment) updateObjectPhysics() {
 	if e.state.ObjectGrasped {
-		e.state.ObjectVelocityX = e.state.CarriageX - e.state.ObjectX
-		e.state.ObjectVelocityY = e.state.GripperY - (e.state.ObjectY + e.config.ObjectHeight/2)
+		e.state.ObjectVelocityX, e.state.ObjectVelocityY = e.state.CarriageVelocityX, e.state.GripperVelocityY
 		e.state.ObjectX = e.state.CarriageX
 		e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
 		return
@@ -148,8 +255,7 @@ func (e *Environment) resolveTerrainCollision() {
 	ground := e.terrainHeight(e.state.ObjectX)
 	minimumY := ground + e.config.ObjectHeight/2
 	if e.state.ObjectY <= minimumY {
-		e.state.ObjectY = minimumY
-		e.state.ObjectVelocityY = 0
+		e.state.ObjectY, e.state.ObjectVelocityY = minimumY, 0
 		e.state.ObjectVelocityX *= 0.8
 		if !e.state.ObjectGrasped && math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2 {
 			e.state.ObjectPlaced = true
@@ -157,11 +263,131 @@ func (e *Environment) resolveTerrainCollision() {
 	}
 }
 
-func (e *Environment) clampPositions() {
-	e.state.CarriageX = clamp(e.state.CarriageX, e.config.WorldMinX, e.config.WorldMaxX)
-	e.state.GripperY = clamp(e.state.GripperY, e.config.WorldMinY, e.config.WorldMaxY)
+func (e *Environment) detectFailure(previous State) string {
+	switch {
+	case e.state.ObjectBroken:
+		return "object_break"
+	case e.objectOutOfBounds():
+		return "workspace_violation"
+	case previous.ObjectGrasped && !e.state.ObjectGrasped && previous.Phase != PhaseReleaseObject:
+		return "unsafe_drop"
+	case e.state.EpisodeStep >= e.config.MaxEpisodeSteps:
+		return "timeout"
+	}
+	return ""
 }
 
+func (e *Environment) updatePhase(previous State) {
+	if e.state.ObjectPlaced && previous.Phase == PhaseReleaseObject {
+		e.state.Phase = PhaseSuccess
+		return
+	}
+	switch previous.Phase {
+	case PhaseApproachObject:
+		if math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance {
+			e.state.Phase = PhaseLowerToObject
+		}
+	case PhaseLowerToObject:
+		if math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance {
+			e.state.Phase = PhaseGripObject
+		}
+	case PhaseGripObject:
+		if e.state.ObjectGrasped {
+			e.state.Phase = PhaseLiftObject
+		}
+	case PhaseLiftObject:
+		if e.state.ObjectGrasped && e.state.ObjectY >= e.requiredCarryHeight() {
+			e.state.Phase = PhaseMoveToTarget
+		}
+	case PhaseMoveToTarget:
+		if e.state.ObjectGrasped && math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2 {
+			e.state.Phase = PhaseLowerAtTarget
+		}
+	case PhaseLowerAtTarget:
+		if e.state.ObjectGrasped && math.Abs(e.state.ObjectY-e.targetRestHeight()) <= e.config.ReleaseTolerance {
+			e.state.Phase = PhaseReleaseObject
+		}
+	}
+}
+
+func (e *Environment) reward(previous State) float64 {
+	reward := e.config.Reward.TimePenalty
+	if previous.Phase == PhaseApproachObject && !e.state.ObjectGrasped {
+		reward += e.config.Reward.ApproachProgressScale * (gripperObjectDistance(previous) - gripperObjectDistance(e.state))
+	}
+	if e.state.ObjectGrasped && !e.gripBonusAwarded {
+		reward += e.config.Reward.SuccessfulGripReward
+		e.gripBonusAwarded = true
+	}
+	if previous.Phase == PhaseLiftObject && e.state.ObjectGrasped {
+		reward += e.config.Reward.LiftProgressScale * (e.state.ObjectY - previous.ObjectY)
+	}
+	if previous.Phase == PhaseMoveToTarget && previous.ObjectGrasped && e.state.ObjectGrasped {
+		reward += e.config.Reward.DeliveryProgressScale * (targetDistance(previous) - targetDistance(e.state))
+	}
+	if previous.Phase == PhaseGripObject && !e.state.ObjectGrasped && e.state.GripForce < e.requiredForce() {
+		reward += e.config.Reward.InsufficientGripPenalty
+	}
+	return reward
+}
+
+func (e *Environment) failurePenalty(reason string) float64 {
+	switch reason {
+	case "object_break":
+		return e.config.Reward.BreakPenalty
+	case "workspace_violation":
+		return e.config.Reward.WorkspacePenalty
+	default:
+		return e.config.Reward.UnsafeDropPenalty
+	}
+}
+
+func (e *Environment) observation() []float32 {
+	state := e.state
+	values := []float64{
+		normalize(state.CarriageX, e.config.WorldMinX, e.config.WorldMaxX),
+		normalize(state.GripperY, e.config.WorldMinY, e.config.WorldMaxY),
+		normalize(state.CarriageVelocityX, -e.config.MaxHorizontalSpeed, e.config.MaxHorizontalSpeed),
+		normalize(state.GripperVelocityY, -e.config.MaxVerticalSpeed, e.config.MaxVerticalSpeed),
+		normalize(state.ObjectX, e.config.WorldMinX, e.config.WorldMaxX),
+		normalize(state.ObjectY, e.config.WorldMinY, e.config.WorldMaxY),
+		normalize(state.ObjectVelocityX, -e.config.MaxHorizontalSpeed, e.config.MaxHorizontalSpeed),
+		normalize(state.ObjectVelocityY, -2*e.config.Gravity, 2*e.config.Gravity),
+		normalize(state.TargetX, e.config.WorldMinX, e.config.WorldMaxX),
+		normalize(state.TargetY, e.config.WorldMinY, e.config.WorldMaxY),
+		normalize(state.ObjectX-state.CarriageX, -e.config.WorldMaxX, e.config.WorldMaxX),
+		normalize(state.ObjectY-state.GripperY, -e.config.WorldMaxY, e.config.WorldMaxY),
+		normalize(state.TargetX-state.ObjectX, -e.config.WorldMaxX, e.config.WorldMaxX),
+		normalize(state.TargetY-state.ObjectY, -e.config.WorldMaxY, e.config.WorldMaxY),
+		normalize01(1 - state.GripperOpening),
+		boolValue(state.ObjectGrasped),
+		normalize(state.GripForce, 0, e.config.MaxGripForce),
+		normalize(e.requiredForce(), 0, e.config.MaxGripForce),
+		normalize(state.ObjectBreakForce, 0, e.config.MaxGripForce),
+		normalize(float64(state.Phase), float64(PhaseIdle), float64(PhaseFailure)),
+	}
+	result := make([]float32, len(values))
+	for index, value := range values {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			result[index] = 0
+		} else {
+			result[index] = float32(clamp(value, -1, 1))
+		}
+	}
+	return result
+}
+
+func (e *Environment) objectGripHeight() float64 { return e.state.ObjectY + e.config.ObjectHeight/2 }
+func (e *Environment) targetRestHeight() float64 { return e.state.TargetY + e.config.ObjectHeight/2 }
+func (e *Environment) requiredCarryHeight() float64 {
+	return math.Max(e.terrainHeight(e.state.ObjectX), e.state.TargetY) + e.config.ObjectHeight/2 + e.config.LiftClearance
+}
+func (e *Environment) requiredForce() float64 {
+	return e.state.ObjectMass * e.config.Gravity / (2 * e.state.ObjectFriction)
+}
+func (e *Environment) objectOutOfBounds() bool {
+	return e.state.ObjectX < e.config.WorldMinX || e.state.ObjectX > e.config.WorldMaxX || e.state.ObjectY < e.config.WorldMinY-1
+}
 func (e *Environment) terrainHeight(x float64) float64 {
 	points := e.config.Terrain
 	if len(points) == 0 {
@@ -170,9 +396,9 @@ func (e *Environment) terrainHeight(x float64) float64 {
 	if x <= points[0].X {
 		return points[0].Y
 	}
-	for i := 1; i < len(points); i++ {
-		if x <= points[i].X {
-			left, right := points[i-1], points[i]
+	for index := 1; index < len(points); index++ {
+		if x <= points[index].X {
+			left, right := points[index-1], points[index]
 			ratio := (x - left.X) / (right.X - left.X)
 			return left.Y + ratio*(right.Y-left.Y)
 		}
@@ -180,77 +406,18 @@ func (e *Environment) terrainHeight(x float64) float64 {
 	return points[len(points)-1].Y
 }
 
-func (e *Environment) requiredForce() float64 {
-	return e.state.ObjectMass * e.config.Gravity / (2 * e.state.ObjectFriction)
+func gripperObjectDistance(state State) float64 {
+	return math.Hypot(state.CarriageX-state.ObjectX, state.GripperY-state.ObjectY)
 }
-
-func (e *Environment) objectOutOfBounds() bool {
-	return e.state.ObjectX < e.config.WorldMinX || e.state.ObjectX > e.config.WorldMaxX || e.state.ObjectY < e.config.WorldMinY-1
+func targetDistance(state State) float64 {
+	return math.Hypot(state.TargetX-state.ObjectX, state.TargetY-state.ObjectY)
 }
-
-func (e *Environment) reward(previous State) float64 {
-	previousObjectDistance := math.Hypot(previous.CarriageX-previous.ObjectX, previous.GripperY-previous.ObjectY)
-	nextObjectDistance := math.Hypot(e.state.CarriageX-e.state.ObjectX, e.state.GripperY-e.state.ObjectY)
-	reward := e.config.Reward.StepPenalty + e.config.Reward.ApproachScale*(previousObjectDistance-nextObjectDistance)
-	if e.state.ObjectGrasped && !previous.ObjectGrasped {
-		reward += e.config.Reward.SafeGraspReward
-	}
-	if e.state.ObjectGrasped {
-		reward += e.config.Reward.LiftScale * (e.state.ObjectY - previous.ObjectY)
-		previousTargetDistance := math.Abs(previous.ObjectX - previous.TargetX)
-		nextTargetDistance := math.Abs(e.state.ObjectX - e.state.TargetX)
-		reward += e.config.Reward.TargetProgressScale * (previousTargetDistance - nextTargetDistance)
-	}
-	if e.state.GripForce >= e.state.ObjectBreakForce*0.9 {
-		reward += e.config.Reward.SlipPenalty
-	}
-	if e.state.ObjectGrasped && e.state.GripForce < e.requiredForce() {
-		reward += e.config.Reward.SlipPenalty
-	}
-	return reward
-}
-
-func (e *Environment) observation() []float32 {
-	state := e.state
-	values := []float64{
-		normalize(state.CarriageX, e.config.WorldMinX, e.config.WorldMaxX),
-		normalize(state.GripperY, e.config.WorldMinY, e.config.WorldMaxY),
-		normalize01(state.GripperOpening),
-		normalize(state.GripForce, 0, e.config.MaxGripForce),
-		normalize(state.ObjectX, e.config.WorldMinX, e.config.WorldMaxX),
-		normalize(state.ObjectY, e.config.WorldMinY, e.config.WorldMaxY),
-		normalize(state.ObjectVelocityX, -e.config.MaxHorizontalSpeed, e.config.MaxHorizontalSpeed),
-		normalize(state.ObjectVelocityY, -e.config.MaxVerticalSpeed*2, e.config.MaxVerticalSpeed*2),
-		normalize(state.CarriageX-state.ObjectX, -e.config.WorldMaxX, e.config.WorldMaxX),
-		normalize(state.GripperY-state.ObjectY, -e.config.WorldMaxY, e.config.WorldMaxY),
-		boolValue(state.ObjectGrasped),
-		normalize(state.TargetX, e.config.WorldMinX, e.config.WorldMaxX),
-		normalize(state.TargetY, e.config.WorldMinY, e.config.WorldMaxY),
-		normalize(state.ObjectX-state.TargetX, -e.config.WorldMaxX, e.config.WorldMaxX),
-		normalize(state.ObjectY-state.TargetY, -e.config.WorldMaxY, e.config.WorldMaxY),
-		normalize(state.ObjectMass, 0, 10),
-		normalize(state.ObjectFriction, 0, 1),
-		normalize(state.ObjectBreakForce, 0, e.config.MaxGripForce),
-		normalize(e.terrainHeight(state.ObjectX), e.config.WorldMinY, e.config.WorldMaxY),
-	}
-	result := make([]float32, len(values))
-	for i, value := range values {
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			result[i] = 0
-		} else {
-			result[i] = float32(clamp(value, -1, 1))
-		}
-	}
-	return result
-}
-
 func normalize(value, minimum, maximum float64) float64 {
 	if maximum <= minimum {
 		return 0
 	}
 	return 2*(value-minimum)/(maximum-minimum) - 1
 }
-
 func normalize01(value float64) float64 { return 2*clamp(value, 0, 1) - 1 }
 func boolValue(value bool) float64 {
 	if value {
@@ -259,11 +426,9 @@ func boolValue(value bool) float64 {
 	return -1
 }
 func clamp(value, minimum, maximum float64) float64 {
-	if value < minimum {
-		return minimum
-	}
-	if value > maximum {
-		return maximum
-	}
-	return value
+	return math.Min(math.Max(value, minimum), maximum)
+}
+
+func (e *Environment) String() string {
+	return fmt.Sprintf("phase=%s step=%d", e.state.Phase, e.state.EpisodeStep)
 }

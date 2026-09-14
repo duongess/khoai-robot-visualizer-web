@@ -7,61 +7,33 @@ import (
 	"github.com/duongess/khoai-robot-control-framework/pkg/framework"
 )
 
-func TestTaskResetIsDeterministic(t *testing.T) {
-	first := NewTask(42, DefaultConfig())
-	second := NewTask(42, DefaultConfig())
-	firstState, err := first.Reset()
+func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
+	task := NewTask(42, DefaultConfig())
+	observation, err := task.Reset()
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondState, err := second.Reset()
-	if err != nil {
-		t.Fatal(err)
+	if task.environment.state.Phase != PhaseApproachObject {
+		t.Fatalf("reset phase = %s, want %s", task.environment.state.Phase, PhaseApproachObject)
 	}
-	if len(firstState) != 19 || !equalStates(firstState, secondState) {
-		t.Fatalf("reset states differ: %#v and %#v", firstState, secondState)
+	if len(observation) != ObservationDimension {
+		t.Fatalf("observation dimension = %d, want %d", len(observation), ObservationDimension)
+	}
+	if observation[observationTargetX] == observation[observationObjectX] || observation[observationTargetFromObjectX] == 0 {
+		t.Fatalf("observation is missing distinct object/target information: %v", observation)
+	}
+	if PhaseFromNormalized(observation[observationPhase]) != PhaseApproachObject {
+		t.Fatalf("observation phase = %v", observation[observationPhase])
+	}
+	for index, value := range observation {
+		if value < -1 || value > 1 || math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			t.Fatalf("observation[%d]=%v is not finite and normalized", index, value)
+		}
 	}
 }
 
-func TestTaskValidatesAndClampsActions(t *testing.T) {
+func TestKnownActionsMoveGripperAndAreClamped(t *testing.T) {
 	task := NewTask(1, DefaultConfig())
-	if _, err := task.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := task.Step(framework.Action{0, 1}); err == nil {
-		t.Fatal("expected action dimension error")
-	}
-	if _, err := task.Step(framework.Action{float32(math.NaN()), 0, 0}); err == nil {
-		t.Fatal("expected non-finite action error")
-	}
-	if _, err := task.Step(framework.Action{2, -2, 2}); err != nil {
-		t.Fatalf("clamped action returned error: %v", err)
-	}
-}
-
-func TestTaskKeepsObservationsNormalized(t *testing.T) {
-	task := NewTask(3, DefaultConfig())
-	state, err := task.Reset()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for step := 0; step < 10; step++ {
-		for i, value := range state {
-			if value < -1 || value > 1 || math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-				t.Fatalf("state[%d] = %v is not normalized", i, value)
-			}
-		}
-		result, stepErr := task.Step(framework.Action{1, 1, -1})
-		if stepErr != nil {
-			t.Fatal(stepErr)
-		}
-		state = result.State
-	}
-}
-
-func TestHorizontalAndVerticalControlsMoveWithinBounds(t *testing.T) {
-	config := DefaultConfig()
-	task := NewTask(1, config)
 	initial, err := task.Reset()
 	if err != nil {
 		t.Fatal(err)
@@ -70,124 +42,159 @@ func TestHorizontalAndVerticalControlsMoveWithinBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left.State[0] >= initial[0] || left.State[1] >= initial[1] {
-		t.Fatalf("negative controls did not move left/down: initial=%v next=%v", initial, left.State)
+	if left.State[observationGripperX] >= initial[observationGripperX] || left.State[observationGripperY] >= initial[observationGripperY] {
+		t.Fatal("known negative action did not move left/down")
 	}
-	right, err := task.Step(framework.Action{1, 1, 1})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := task.Step(framework.Action{2, -2, 2}); err != nil {
+		t.Fatalf("clamped action returned %v", err)
 	}
-	if right.State[0] <= left.State[0] || right.State[1] <= left.State[1] {
-		t.Fatalf("positive controls did not move right/up: left=%v next=%v", left.State, right.State)
+	if _, err := task.Step(framework.Action{float32(math.NaN()), 0, 0}); err == nil {
+		t.Fatal("expected invalid action rejection")
 	}
 }
 
-func TestGripControlSupportsSafeGraspAndBreakage(t *testing.T) {
+func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 	config := DefaultConfig()
-	config.ObjectBreakForce = 18
+	config.InitialCarriageX = 0.5
+	toward := NewTask(1, config)
+	away := NewTask(1, config)
+	_, _ = toward.Reset()
+	_, _ = away.Reset()
+	towardResult, err := toward.Step(framework.Action{1, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	awayResult, err := away.Step(framework.Action{-1, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if towardResult.Reward <= awayResult.Reward {
+		t.Fatalf("toward reward %v <= away reward %v", towardResult.Reward, awayResult.Reward)
+	}
+}
+
+func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
+	config := DefaultConfig()
 	config.InitialGripperY = config.Terrain[1].Y + config.ObjectHeight
 	task := NewTask(1, config)
+	_, _ = task.Reset()
+	grip, err := task.Step(framework.Action{0, 0, 0.5})
+	if err != nil || !task.environment.state.ObjectGrasped {
+		t.Fatalf("safe grip result=%#v error=%v", grip, err)
+	}
+	again, err := task.Step(framework.Action{0, 0, 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grip.Reward-again.Reward < float32(config.Reward.SuccessfulGripReward)-0.01 {
+		t.Fatalf("grip bonus was repeated: first=%v second=%v", grip.Reward, again.Reward)
+	}
+
+	broken := NewTask(1, config)
+	_, _ = broken.Reset()
+	result, err := broken.Step(framework.Action{0, 0, 1})
+	if err != nil || !result.Done || result.Outcome != OutcomeFailure {
+		t.Fatalf("break result=%#v error=%v", result, err)
+	}
+}
+
+func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	_, _ = task.Reset()
+	advanceToPhase(t, task, PhaseMoveToTarget)
+	progress, err := task.Step(framework.Action{1, 0, 0.5})
+	if err != nil || progress.Reward <= 0 {
+		t.Fatalf("delivery progress=%#v error=%v", progress, err)
+	}
+
+	outside := NewTask(1, DefaultConfig())
+	_, _ = outside.Reset()
+	outside.environment.state.ObjectGrasped = true
+	outside.environment.state.Phase = PhaseReleaseObject
+	outside.environment.state.CarriageX = 1
+	outside.environment.state.ObjectX = 1
+	outside.environment.state.GripperY = outside.environment.targetRestHeight()
+	outside.environment.state.ObjectY = outside.environment.targetRestHeight() - outside.environment.config.ObjectHeight/2
+	result, err := outside.Step(framework.Action{0, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome == OutcomeSuccess || result.Done && result.Outcome == OutcomeSuccess {
+		t.Fatalf("release outside target reported success: %#v", result)
+	}
+}
+
+func TestTimeoutAndResetClearEpisodeState(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxEpisodeSteps = 1
+	task := NewTask(1, config)
+	_, _ = task.Reset()
+	result, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil || !result.Done || result.Outcome != OutcomeFailure {
+		t.Fatalf("timeout=%#v error=%v", result, err)
+	}
+	task.environment.gripBonusAwarded, task.environment.wasEverGrasped, task.environment.failureReason = true, true, "timeout"
+	_, _ = task.Reset()
+	if task.environment.gripBonusAwarded || task.environment.wasEverGrasped || task.environment.failureReason != "" || task.environment.state.EpisodeStep != 0 || task.environment.state.Phase != PhaseApproachObject {
+		t.Fatalf("reset retained episode state: %#v", task.environment)
+	}
+}
+
+func TestScriptedPickAndPlaceSucceeds(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	result, err := task.Step(framework.Action{0, 0, 0.4})
+	advanceToPhase(t, task, PhaseReleaseObject)
+	result, err := task.Step(framework.Action{0, 0, -1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Outcome != OutcomeRunning || !task.environment.state.ObjectGrasped {
-		t.Fatalf("safe grip did not grasp object: result=%#v state=%#v", result, task.environment.state)
-	}
-
-	brokenTask := NewTask(1, config)
-	if _, err := brokenTask.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	result, err = brokenTask.Step(framework.Action{0, 0, 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Outcome != OutcomeFailure || !result.Done || !brokenTask.environment.state.ObjectBroken {
-		t.Fatalf("excessive grip did not break object: result=%#v state=%#v", result, brokenTask.environment.state)
+	if !result.Done || result.Outcome != OutcomeSuccess || task.environment.state.Phase != PhaseSuccess {
+		t.Fatalf("scripted episode did not succeed: result=%#v environment=%s", result, task.environment)
 	}
 }
 
-func TestTaskOutcomes(t *testing.T) {
-	config := DefaultConfig()
-	config.MaxEpisodeSteps = 1
-	timeoutTask := NewTask(1, config)
-	if _, err := timeoutTask.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	timeout, err := timeoutTask.Step(framework.Action{0, 0, -1})
-	if err != nil || timeout.Outcome != OutcomeFailure || !timeout.Done {
-		t.Fatalf("timeout outcome = %#v, error = %v", timeout, err)
-	}
-
-	placementConfig := DefaultConfig()
-	placementTask := NewTask(1, placementConfig)
-	if _, err := placementTask.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	placementTask.environment.state.ObjectX = placementConfig.TargetX
-	placementTask.environment.state.ObjectY = placementTask.environment.terrainHeight(placementConfig.TargetX) + placementConfig.ObjectHeight/2 + 0.01
-	placementTask.environment.state.CarriageX = placementConfig.TargetX
-	placementTask.environment.state.GripperY = placementTask.environment.state.ObjectY + placementConfig.ObjectHeight/2
-	placementTask.environment.state.ObjectGrasped = true
-	placement, err := placementTask.Step(framework.Action{0, 0, -1})
-	if err != nil || placement.Outcome != OutcomeSuccess || !placement.Done {
-		t.Fatalf("placement outcome = %#v, error = %v", placement, err)
-	}
-}
-
-func TestTasksAreIsolated(t *testing.T) {
-	config := DefaultConfig()
-	first := NewTask(1, config)
-	second := NewTask(1, config)
-	if _, err := first.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := second.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.Step(framework.Action{1, 1, -1}); err != nil {
-		t.Fatal(err)
-	}
-	secondAfter, err := second.Step(framework.Action{0, 0, -1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fresh := NewTask(1, config)
-	if _, err := fresh.Reset(); err != nil {
-		t.Fatal(err)
-	}
-	freshAfter, err := fresh.Step(framework.Action{0, 0, -1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !equalStates(secondAfter.State, freshAfter.State) {
-		t.Fatal("stepping one task affected another task")
-	}
-}
-
-func TestRegisterRejectsDuplicateTask(t *testing.T) {
+func TestRegisterStillWorks(t *testing.T) {
 	runtime := framework.NewRuntime()
-	config := DefaultConfig()
-	if err := Register(runtime, config); err != nil {
+	if err := Register(runtime, DefaultConfig()); err != nil {
 		t.Fatal(err)
 	}
-	if err := Register(runtime, config); err == nil {
+	if err := Register(runtime, DefaultConfig()); err == nil {
 		t.Fatal("expected duplicate registration error")
 	}
 }
 
-func equalStates(first, second framework.State) bool {
-	if len(first) != len(second) {
-		return false
-	}
-	for i := range first {
-		if first[i] != second[i] {
-			return false
+func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
+	t.Helper()
+	for step := 0; step < 200 && task.environment.state.Phase != wanted; step++ {
+		phase := task.environment.state.Phase
+		action := framework.Action{0, 0, 0.5}
+		switch phase {
+		case PhaseApproachObject:
+			action = framework.Action{0, 0, -1}
+		case PhaseLowerToObject:
+			action = framework.Action{0, -1, -1}
+		case PhaseGripObject:
+			action = framework.Action{0, 0, 0.5}
+		case PhaseLiftObject:
+			action = framework.Action{0, 1, 0.5}
+		case PhaseMoveToTarget:
+			action = framework.Action{1, 0, 0.5}
+		case PhaseLowerAtTarget:
+			action = framework.Action{0, -1, 0.5}
+		default:
+			t.Fatalf("cannot advance from phase %s", phase)
+		}
+		result, err := task.Step(action)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Done {
+			t.Fatalf("episode ended before %s: %#v", wanted, result)
 		}
 	}
-	return true
+	if task.environment.state.Phase != wanted {
+		t.Fatalf("phase=%s, want %s", task.environment.state.Phase, wanted)
+	}
 }

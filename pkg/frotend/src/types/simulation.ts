@@ -1,4 +1,4 @@
-export type RuntimeStatus = 'stopped' | 'running' | 'paused' | 'resetting' | 'error';
+export type RuntimeStatus = 'stopped' | 'running' | 'paused' | 'stalled' | 'resetting' | 'error';
 export type SimulationMode = 'independent' | 'swarm';
 
 export type ObjectStatus =
@@ -15,6 +15,17 @@ export type ObjectStatus =
   | 'broken';
 
 export type TaskPhase =
+  | 'idle'
+  | 'approach_object'
+  | 'lower_to_object'
+  | 'grip_object'
+  | 'lift_object'
+  | 'move_to_target'
+  | 'lower_at_target'
+  | 'release_object'
+  | 'success'
+  | 'failure'
+  // Legacy mock-only values retained until the mock telemetry fixture is removed.
   | 'approach_horizontal'
   | 'lower'
   | 'open'
@@ -105,6 +116,7 @@ export interface RuntimeMetrics {
   replay_buffer_size: number;
   training_batches: number;
   policy_version: number;
+  last_error?: string;
 }
 
 export interface GantryState {
@@ -158,6 +170,7 @@ export interface WorkerState {
   object: ObjectState;
   target: {
     position_x: number;
+    position_y?: number;
     width: number;
   };
   terrain: {
@@ -167,6 +180,9 @@ export interface WorkerState {
     normalized_grip_force: number;
   };
   last_reward: number;
+  cumulative_reward?: number;
+  distance_to_object?: number;
+  distance_to_target?: number;
   done: boolean;
   outcome: string;
 }

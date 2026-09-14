@@ -210,6 +210,11 @@ export interface SceneUpdatePayload {
       x: number;
       y: number;
     };
+    mass?: number;
+    friction?: number;
+    break_force?: number;
+    width?: number;
+    height?: number;
   };
   gantry?: {
     carriage_x: number;

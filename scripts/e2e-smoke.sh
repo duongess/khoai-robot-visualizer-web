@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FRAMEWORK_DIR="$(cd "$ROOT_DIR/../khoai-robot-control-framework" && pwd)"
+ADDRESS="127.0.0.1:18080"
+LEARNER_LOG="$(mktemp /tmp/swarmdex-learner.XXXXXX)"
+VISUALIZER_LOG="$(mktemp /tmp/swarmdex-visualizer.XXXXXX)"
+
+cleanup() {
+  kill "${VISUALIZER_PID:-}" "${LEARNER_PID:-}" 2>/dev/null || true
+  wait "${VISUALIZER_PID:-}" 2>/dev/null || true
+  wait "${LEARNER_PID:-}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+wait_for_url() {
+  local url="$1"
+  for _ in $(seq 1 40); do
+    if curl -fsS "$url" >/dev/null 2>&1; then return 0; fi
+    sleep 0.25
+  done
+  return 1
+}
+
+cd "$ROOT_DIR"
+make build
+(cd "$FRAMEWORK_DIR" && poetry run python -m ai >"$LEARNER_LOG" 2>&1) &
+LEARNER_PID=$!
+FORCE_CONTROL_ADDR="$ADDRESS" ./bin/force-control-demo >"$VISUALIZER_LOG" 2>&1 &
+VISUALIZER_PID=$!
+
+if ! wait_for_url "http://$ADDRESS/api/health"; then
+  cat "$LEARNER_LOG" "$VISUALIZER_LOG"
+  exit 1
+fi
+
+for _ in $(seq 1 40); do
+  STATUS="$(curl -fsS "http://$ADDRESS/api/status")"
+  if grep -q '"training_batches":[1-9]' <<<"$STATUS"; then break; fi
+  sleep 0.25
+done
+grep -q '"total_steps":[1-9]' <<<"$STATUS"
+grep -q '"training_batches":[1-9]' <<<"$STATUS"
+
+node --input-type=module -e "await new Promise((resolve, reject) => { const socket = new WebSocket('ws://$ADDRESS/ws'); const timer = setTimeout(() => reject(new Error('telemetry timeout')), 3000); socket.addEventListener('message', event => { const snapshot = JSON.parse(event.data); if (snapshot.type !== 'simulation_snapshot') reject(new Error('unexpected telemetry')); clearTimeout(timer); socket.close(); resolve(); }); socket.addEventListener('error', () => reject(new Error('WebSocket error'))); });"
+printf '%s\n' "End-to-end smoke test passed."

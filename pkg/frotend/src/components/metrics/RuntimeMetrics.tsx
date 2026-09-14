@@ -133,8 +133,8 @@ export const RuntimeMetrics: React.FC = () => {
     {
       id: 'metric-ws-status',
       label: 'Telemetry Stream',
-      value: webSocketStatus === 'mock' ? 'MOCK TELEMETRY' : webSocketStatus.toUpperCase(),
-      subtext: 'Live 16Hz pipe',
+      value: webSocketStatus.toUpperCase(),
+      subtext: 'Live runtime connection',
       icon: Radio,
       color: 'text-emerald-400',
     },

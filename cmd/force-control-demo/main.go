@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -21,29 +20,44 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runtime := framework.NewRuntime()
-	if err := forcecontrol.Register(runtime, forcecontrol.DefaultConfig()); err != nil {
-		log.Fatalf("register force-control task: %v", err)
+	learner, err := framework.NewLearnerClient(ctx)
+	if err != nil {
+		log.Fatalf("connect to learner: %v", err)
+	}
+	defer learner.Close()
+	health, err := learner.HealthCheck(ctx)
+	if err != nil {
+		log.Fatalf("check learner health: %v", err)
+	}
+	if !health.Ready {
+		log.Fatal("learner is not ready")
 	}
 
+	runtime := framework.NewRuntime()
+	config := forcecontrol.DefaultConfig()
+	if err := forcecontrol.Register(runtime, config); err != nil {
+		log.Fatalf("register force-control task: %v", err)
+	}
+	if err := runtime.Configure(framework.DefaultRuntimeConfig(), learner); err != nil {
+		log.Fatalf("configure runtime: %v", err)
+	}
+	api, err := pkg.NewAPIServer(runtime, config)
+	if err != nil {
+		log.Fatalf("initialize API server: %v", err)
+	}
 	uiHandler, err := pkg.NewUIHandler()
 	if err != nil {
 		log.Fatalf("initialize embedded frontend: %v", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiHandler())
-	// Reserve the WebSocket route so it cannot be handled by the SPA fallback.
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "WebSocket telemetry is not configured", http.StatusNotImplemented)
-	})
+	mux.Handle("/api/", api.APIHandler())
+	mux.Handle("/ws", api.WebSocketHandler())
 	mux.Handle("/", uiHandler)
-
 	address := os.Getenv("FORCE_CONTROL_ADDR")
 	if address == "" {
 		address = "127.0.0.1:8080"
 	}
-
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		log.Fatalf("start HTTP server on %s: %v", address, err)
@@ -51,38 +65,23 @@ func main() {
 	server := &http.Server{Handler: mux}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.Serve(listener) }()
+	if err := runtime.Start(ctx); err != nil {
+		_ = server.Close()
+		log.Fatalf("start force-control runtime: %v", err)
+	}
 	log.Printf("SwarmDex visualizer is running at http://%s", address)
 
 	select {
 	case <-ctx.Done():
-		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
-			log.Printf("shut down HTTP server: %v", err)
-		}
 	case err := <-serverErrors:
 		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("HTTP server failed: %v", err)
+			log.Printf("HTTP server failed: %v", err)
 		}
 	}
-}
-
-func apiHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/status" {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
-			return
-		}
-		if r.URL.Path == "/api/scene" && r.Method == http.MethodPut {
-			writeJSON(w, http.StatusOK, map[string]any{"success": true})
-			return
-		}
-		http.NotFound(w, r)
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	runtime.Stop()
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownContext); err != nil {
+		log.Printf("shut down HTTP server: %v", err)
+	}
 }

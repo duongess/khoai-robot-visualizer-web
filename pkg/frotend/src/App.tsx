@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { useSimulationStore } from './lib/simulation-store';
-import { mockTelemetryClient } from './lib/mock-telemetry-client';
+import { runtimeClient } from './lib/runtime-client';
 import { RobotCanvas } from './components/simulation/RobotCanvas';
 import { SimulationControls } from './components/controls/SimulationControls';
 import { PhysicsMetrics } from './components/metrics/PhysicsMetrics';
@@ -29,13 +29,22 @@ export default function App() {
     setActiveTab,
   } = useSimulationStore();
 
-  // Connect mock telemetry adapter for Phase 1 visual development
   useEffect(() => {
-    const unsubscribe = mockTelemetryClient.subscribe((snapshot) => {
-      setLatestTelemetry(snapshot);
+    const unsubscribe = runtimeClient.subscribe(setLatestTelemetry);
+    const unsubscribeConnection = runtimeClient.onConnection((status) => {
+      useSimulationStore.setState({ webSocketStatus: status });
+    });
+    runtimeClient.connect();
+    void runtimeClient.getConfig().then((config) => {
+      useSimulationStore.setState({
+        confirmedConfig: JSON.parse(JSON.stringify(config)),
+        draftConfig: JSON.parse(JSON.stringify(config)),
+      });
     });
     return () => {
       unsubscribe();
+      unsubscribeConnection();
+      runtimeClient.disconnect();
     };
   }, [setLatestTelemetry]);
 
@@ -168,8 +177,8 @@ export default function App() {
       <footer className="h-8 bg-slate-950 border-t border-slate-800/80 px-4 flex items-center justify-between text-[11px] font-mono text-slate-500 shrink-0">
         <div>SwarmDex Visualizer — Two-Segment Force Control Architecture</div>
         <div className="flex items-center gap-4">
-          <span>Target Architecture: Go backend / Next.js Web</span>
-          <span>Port 3000 Active</span>
+          <span>Go backend / React and Vite UI</span>
+          <span>Same-origin runtime connection</span>
         </div>
       </footer>
     </div>

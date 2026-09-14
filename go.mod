@@ -12,5 +12,3 @@ require (
 	google.golang.org/grpc v1.75.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
-
-replace github.com/duongess/khoai-robot-control-framework => ../khoai-robot-control-framework

@@ -8,7 +8,8 @@ import {
   SceneUpdatePayload,
   TerrainPoint,
 } from '../types/simulation';
-import { mockTelemetryClient, DEFAULT_SCENE_CONFIG } from './mock-telemetry-client';
+import { DEFAULT_SCENE_CONFIG } from './default-scene-config';
+import { runtimeClient } from './runtime-client';
 import { updateSceneApi } from './simulation-api';
 import { DEFAULT_FLAT_TERRAIN_POINTS } from '../components/simulation/editable-terrain';
 
@@ -19,7 +20,7 @@ export interface SimulationStore {
   runtimeStatus: RuntimeStatus;
   selectedWorkerId: number;
   selectedMode: SimulationMode;
-  webSocketStatus: 'connected' | 'connecting' | 'disconnected' | 'mock';
+  webSocketStatus: 'connected' | 'connecting' | 'disconnected';
   latestTelemetry: SimulationSnapshot | null;
   telemetryHistory: ChartSample[];
   showVectors: boolean;
@@ -44,10 +45,10 @@ export interface SimulationStore {
   // Actions
   setLatestTelemetry: (snapshot: SimulationSnapshot) => void;
   setSelectedWorker: (id: number) => void;
-  startSimulation: () => void;
-  pauseSimulation: () => void;
-  resumeSimulation: () => void;
-  resetSimulation: () => void;
+  startSimulation: () => Promise<void>;
+  pauseSimulation: () => Promise<void>;
+  resumeSimulation: () => Promise<void>;
+  resetSimulation: () => Promise<void>;
   requestModeChange: (mode: SimulationMode) => void;
   confirmModeChange: () => void;
   cancelModeChange: () => void;
@@ -82,7 +83,7 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   runtimeStatus: 'running',
   selectedWorkerId: 1,
   selectedMode: 'swarm',
-  webSocketStatus: 'mock',
+  webSocketStatus: 'disconnected',
   latestTelemetry: null,
   telemetryHistory: [],
   showVectors: true,
@@ -131,17 +132,16 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   },
 
   setSelectedWorker: (id: number) => {
-    mockTelemetryClient.setSelectedWorker(id);
     set({ selectedWorkerId: id });
   },
 
-  startSimulation: () => {
-    mockTelemetryClient.start();
+  startSimulation: async () => {
+    await runtimeClient.command('/api/simulation/start');
     set({ runtimeStatus: 'running', selectedEntity: null, isDraggingEntity: false });
   },
 
-  pauseSimulation: () => {
-    mockTelemetryClient.pause();
+  pauseSimulation: async () => {
+    await runtimeClient.command('/api/simulation/pause');
     // When paused, clone current confirmed configuration into draft
     set({
       runtimeStatus: 'paused',
@@ -151,13 +151,13 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     });
   },
 
-  resumeSimulation: () => {
-    mockTelemetryClient.resume();
+  resumeSimulation: async () => {
+    await runtimeClient.command('/api/simulation/resume');
     set({ runtimeStatus: 'running', selectedEntity: null, isDraggingEntity: false });
   },
 
-  resetSimulation: () => {
-    mockTelemetryClient.reset();
+  resetSimulation: async () => {
+    await runtimeClient.command('/api/simulation/reset');
     set({ runtimeStatus: 'resetting', selectedEntity: null, isDraggingEntity: false });
   },
 
@@ -169,11 +169,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     });
   },
 
-  confirmModeChange: () => {
+  confirmModeChange: async () => {
     const { pendingMode } = get();
     if (!pendingMode) return;
-    mockTelemetryClient.setMode(pendingMode);
-    mockTelemetryClient.reset();
+    await runtimeClient.command('/api/simulation/mode', { mode: pendingMode });
+    await runtimeClient.command('/api/simulation/reset');
     set({
       selectedMode: pendingMode,
       showModeDialog: false,
@@ -319,6 +319,11 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const res = await updateSceneApi({
       object: {
         position: { x: draftConfig.object.position_x, y: draftConfig.object.position_y },
+        mass: draftConfig.object.mass,
+        friction: draftConfig.object.friction,
+        break_force: draftConfig.object.break_force,
+        width: draftConfig.object.width,
+        height: draftConfig.object.height,
       },
       gantry: {
         carriage_x: draftConfig.gantry.carriage_x,

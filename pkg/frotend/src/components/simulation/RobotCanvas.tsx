@@ -212,7 +212,7 @@ export const RobotCanvas: React.FC = () => {
       // 4. Draggable Object
       const currentObjX = isPaused ? draftConfig.object.position_x : cur.objX;
       const currentObjY = isPaused ? draftConfig.object.position_y : cur.objY;
-      const isGrasped = cur.status === 'grasped' || cur.status === 'lifting' || cur.status === 'carrying';
+      const isGrasped = cur.status === 'grasped' || cur.status === 'attached' || cur.status === 'transported' || cur.status === 'lifting' || cur.status === 'carrying';
 
       drawDraggableObject({
         position: { x: currentObjX, y: currentObjY },

@@ -50,6 +50,8 @@ export const PhysicsMetrics: React.FC = () => {
   const mass = obj?.mass ?? draftConfig.object.mass;
   const friction = obj?.friction ?? draftConfig.object.friction;
   const objectStatus = obj?.status ?? 'idle';
+	const objectAttached = worker?.object_attached ?? false;
+	const contactDetected = worker?.contact_detected ?? false;
   const taskPhase: TaskPhase = worker?.task_phase ?? 'idle';
   const phaseInfo = TASK_PHASE_LABELS[taskPhase] || { step: 0, label: taskPhase, desc: '' };
 
@@ -62,7 +64,9 @@ export const PhysicsMetrics: React.FC = () => {
 
   // Safety state evaluation according to Section 5 rules
   let forceState: 'stable' | 'slipping' | 'break_risk' = 'stable';
-  if (currentGripForce < requiredGripForce) {
+	if (!objectAttached) {
+		forceState = 'slipping';
+	} else if (currentGripForce < requiredGripForce) {
     forceState = 'slipping';
   } else if (currentGripForce >= breakForce) {
     forceState = 'break_risk';
@@ -121,6 +125,13 @@ export const PhysicsMetrics: React.FC = () => {
               {objectStatus}
             </div>
           </div>
+
+			<div className="bg-slate-950/60 border border-slate-800/80 p-2 rounded">
+				<div className="text-[10px] text-slate-400">Contact / Attachment</div>
+				<div className="font-bold text-slate-100 uppercase tracking-wide mt-0.5">
+					{contactDetected ? 'CONTACT' : 'NONE'} / {objectAttached ? 'ATTACHED' : 'DETACHED'}
+				</div>
+			</div>
 
           <div className="bg-slate-950/60 border border-slate-800/80 p-2 rounded">
             <div className="text-[10px] text-slate-400">Simulation Status</div>

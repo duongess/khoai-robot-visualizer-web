@@ -48,9 +48,33 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 	if err != nil {
 		return framework.StepResult{}, err
 	}
-	boundaryHit := float32(0)
-	if t.environment.state.BoundaryHit {
-		boundaryHit = 1
+	state, breakdown := t.environment.state, t.environment.lastReward
+	info := map[string]float32{
+		"boundary_hit":               float32(boolToFloat(state.BoundaryHit)),
+		"coordinate_system_version":  CoordinateSystemVersion,
+		"gripper_closed":             float32(boolToFloat(state.Grip.GripperClosed)),
+		"contact_detected":           float32(boolToFloat(state.Grip.ContactDetected)),
+		"force_valid":                float32(boolToFloat(state.Grip.ForceValid)),
+		"object_attached":            float32(boolToFloat(state.Grip.ObjectAttached)),
+		"object_released":            float32(boolToFloat(t.environment.wasEverGrasped && !state.Grip.ObjectAttached)),
+		"object_broken":              float32(boolToFloat(state.ObjectBroken)),
+		"object_stable":              float32(boolToFloat(t.environment.objectStable())),
+		"gripper_to_object_distance": float32(gripperObjectDistance(state)),
+		"object_to_target_distance":  float32(targetDistance(state)),
+		"approach_reward":            float32(breakdown.Approach),
+		"grip_reward":                float32(breakdown.Grip),
+		"lift_reward":                float32(breakdown.Lift),
+		"delivery_reward":            float32(breakdown.Delivery),
+		"success_reward":             float32(breakdown.Success),
+		"penalty_reward":             float32(breakdown.Penalty),
+		"total_step_reward":          float32(breakdown.Total),
 	}
-	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done, Info: map[string]float32{"boundary_hit": boundaryHit, "coordinate_system_version": CoordinateSystemVersion}}, nil
+	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done, Info: info}, nil
+}
+
+func boolToFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }

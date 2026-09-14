@@ -5,6 +5,9 @@ export type ObjectStatus =
   | 'idle'
   | 'targeted'
   | 'grasping'
+	| 'attached'
+	| 'transported'
+	| 'released'
   | 'grasped'
   | 'lifting'
   | 'carrying'
@@ -166,6 +169,9 @@ export interface WorkerState {
   episode_id: number;
   episode_step: number;
   task_phase: TaskPhase;
+	gripper_state?: 'open' | 'closed';
+	contact_state?: 'none' | 'contact';
+	force_valid?: boolean;
   gantry: GantryState;
   robot?: RobotState; // compatibility shim
   object: ObjectState;
@@ -198,6 +204,15 @@ export interface WorkerState {
   velocity_y?: number;
   target_grasp_y?: number;
   vertical_error?: number;
+	contact_detected?: boolean;
+	object_attached?: boolean;
+	object_stable?: boolean;
+	approach_reward?: number;
+	grip_reward?: number;
+	delivery_reward?: number;
+	success_reward?: number;
+	penalty_reward?: number;
+	total_step_reward?: number;
 }
 
 export interface SimulationSnapshot {

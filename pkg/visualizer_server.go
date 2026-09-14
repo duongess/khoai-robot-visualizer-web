@@ -220,7 +220,6 @@ func (s *APIServer) telemetry() map[string]any {
 		carriageX, gripperY := denormalize(get(0), config.Workspace.MinX, config.Workspace.MaxX), denormalize(get(1), config.Workspace.MinY, config.Workspace.MaxY)
 		objectX, objectY := denormalize(get(4), config.Workspace.MinX, config.Workspace.MaxX), denormalize(get(5), config.Workspace.MinY, config.Workspace.MaxY)
 		phase := forcecontrol.PhaseFromNormalized(float32(get(19)))
-		status := objectStatus(phase, get(15) > 0)
 		lastAction := []float32{0, 0, 0}
 		if len(selected.LastAction) == 3 {
 			lastAction = selected.LastAction
@@ -230,33 +229,45 @@ func (s *APIServer) telemetry() map[string]any {
 		targetX, targetY := denormalize(get(8), config.Workspace.MinX, config.Workspace.MaxX), denormalize(get(9), config.Workspace.MinY, config.Workspace.MaxY)
 		targetGraspY := forcecontrol.GraspHeight(config, objectY, carriageX)
 		boundaryHit := selected.Info["boundary_hit"] > 0
-		worker = map[string]any{"id": selected.ID, "episode_id": selected.EpisodeID, "episode_step": selected.EpisodeStep, "task_phase": phase.String(), "gantry": map[string]any{"carriage_x": carriageX, "gripper_y": gripperY, "grip_force": gripForce, "jaw_opening": 1 - (get(14)+1)/2, "rail_y": config.RailY}, "object": map[string]any{"id": "object-1", "position": map[string]any{"x": objectX, "y": objectY}, "velocity": map[string]any{"x": denormalize(get(6), -config.MaxHorizontalSpeed, config.MaxHorizontalSpeed), "y": denormalize(get(7), -2*config.Gravity, 2*config.Gravity)}, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": denormalize(get(18), 0, config.MaxGripForce), "required_grip_force": denormalize(get(17), 0, config.MaxGripForce), "safety_margin": gripForce - denormalize(get(17), 0, config.MaxGripForce), "status": status}, "target": map[string]any{"position_x": targetX, "position_y": targetY, "width": config.TargetWidth}, "workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "safeMinX": safeBounds.MinX, "safeMaxX": safeBounds.MaxX, "safeMinY": safeBounds.MinY, "safeMaxY": safeBounds.MaxY, "boundaryHit": boundaryHit, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "workspace_min_x": config.Workspace.MinX, "workspace_max_x": config.Workspace.MaxX, "workspace_min_y": config.Workspace.MinY, "workspace_max_y": config.Workspace.MaxY, "terrain": map[string]any{"points": s.sceneConfig()["terrain"].(map[string]any)["points"]}, "last_action": map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "normalized_grip_force": lastAction[2]}, "latest_vertical_action": lastAction[1], "velocity_y": denormalize(get(3), -config.MaxVerticalSpeed, config.MaxVerticalSpeed), "target_grasp_y": targetGraspY, "vertical_error": targetGraspY - gripperY, "last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": math.Hypot(carriageX-objectX, gripperY-objectY), "distance_to_target": math.Hypot(objectX-targetX, objectY-targetY), "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome}
+		gripperClosed := selected.Info["gripper_closed"] > 0
+		contactDetected := selected.Info["contact_detected"] > 0
+		objectAttached := selected.Info["object_attached"] > 0
+		objectReleased := selected.Info["object_released"] > 0
+		objectBroken := selected.Info["object_broken"] > 0
+		status := objectStatus(phase, gripperClosed, contactDetected, objectAttached, objectReleased, objectBroken)
+		worker = map[string]any{"id": selected.ID, "episode_id": selected.EpisodeID, "episode_step": selected.EpisodeStep, "task_phase": phase.String(), "gripper_state": ternary(gripperClosed, "closed", "open"), "contact_state": ternary(contactDetected, "contact", "none"), "force_valid": selected.Info["force_valid"] > 0, "gantry": map[string]any{"carriage_x": carriageX, "gripper_y": gripperY, "grip_force": gripForce, "jaw_opening": 1 - (get(14)+1)/2, "rail_y": config.RailY}, "object": map[string]any{"id": "object-1", "position": map[string]any{"x": objectX, "y": objectY}, "velocity": map[string]any{"x": denormalize(get(6), -config.MaxHorizontalSpeed, config.MaxHorizontalSpeed), "y": denormalize(get(7), -2*config.Gravity, 2*config.Gravity)}, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": denormalize(get(18), 0, config.MaxGripForce), "required_grip_force": denormalize(get(17), 0, config.MaxGripForce), "safety_margin": gripForce - denormalize(get(17), 0, config.MaxGripForce), "status": status}, "target": map[string]any{"position_x": targetX, "position_y": targetY, "width": config.TargetWidth}, "workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "safeMinX": safeBounds.MinX, "safeMaxX": safeBounds.MaxX, "safeMinY": safeBounds.MinY, "safeMaxY": safeBounds.MaxY, "boundaryHit": boundaryHit, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "workspace_min_x": config.Workspace.MinX, "workspace_max_x": config.Workspace.MaxX, "workspace_min_y": config.Workspace.MinY, "workspace_max_y": config.Workspace.MaxY, "terrain": map[string]any{"points": s.sceneConfig()["terrain"].(map[string]any)["points"]}, "last_action": map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "normalized_grip_force": lastAction[2]}, "latest_vertical_action": lastAction[1], "velocity_y": denormalize(get(3), -config.MaxVerticalSpeed, config.MaxVerticalSpeed), "target_grasp_y": targetGraspY, "vertical_error": targetGraspY - gripperY, "last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": selected.Info["gripper_to_object_distance"], "distance_to_target": selected.Info["object_to_target_distance"], "contact_detected": contactDetected, "object_attached": objectAttached, "object_stable": selected.Info["object_stable"] > 0, "approach_reward": selected.Info["approach_reward"], "grip_reward": selected.Info["grip_reward"], "delivery_reward": selected.Info["delivery_reward"], "success_reward": selected.Info["success_reward"], "penalty_reward": selected.Info["penalty_reward"], "total_step_reward": selected.Info["total_step_reward"], "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome}
 	}
 	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": snapshot.StepsPerSecond, "episodes_per_second": snapshot.EpisodesPerSecond, "total_steps": snapshot.TotalSteps, "success_rate": snapshot.SuccessRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy, "last_error": snapshot.LastError}, "worker": worker}
 }
 
-func objectStatus(phase forcecontrol.Phase, grasped bool) string {
+func objectStatus(phase forcecontrol.Phase, gripperClosed, contactDetected, attached, released, broken bool) string {
 	switch phase {
 	case forcecontrol.PhaseSuccess:
 		return "placed"
-	case forcecontrol.PhaseFailure:
-		return "broken"
-	case forcecontrol.PhaseLiftObject:
-		return "lifting"
-	case forcecontrol.PhaseMoveToTarget, forcecontrol.PhaseLowerAtTarget:
-		return "carrying"
-	case forcecontrol.PhaseReleaseObject:
-		return "releasing"
-	case forcecontrol.PhaseGripObject:
-		return "grasping"
-	case forcecontrol.PhaseApproachObject, forcecontrol.PhaseLowerToObject:
-		return "targeted"
-	default:
-		if grasped {
-			return "grasped"
-		}
-		return "idle"
 	}
+	if broken {
+		return "broken"
+	}
+	if attached {
+		if phase == forcecontrol.PhaseMoveToTarget || phase == forcecontrol.PhaseLowerAtTarget || phase == forcecontrol.PhaseLiftObject {
+			return "transported"
+		}
+		return "attached"
+	}
+	if contactDetected && gripperClosed {
+		return "grasping"
+	}
+	if released {
+		return "released"
+	}
+	return "idle"
+}
+
+func ternary(condition bool, whenTrue, whenFalse string) string {
+	if condition {
+		return whenTrue
+	}
+	return whenFalse
 }
 
 func (s *APIServer) writeJSON(w http.ResponseWriter, status int, value any) {

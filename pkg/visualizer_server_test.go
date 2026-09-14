@@ -71,6 +71,9 @@ func TestAPIServerRejectsRunningSceneUpdatesAndPublishesTelemetry(t *testing.T) 
 	if workerTelemetry["latest_vertical_action"] == nil || workerTelemetry["target_grasp_y"] == nil || workerTelemetry["vertical_error"] == nil {
 		t.Fatalf("telemetry lacks vertical diagnostics: %#v", workerTelemetry)
 	}
+	if workerTelemetry["contact_detected"] == nil || workerTelemetry["object_attached"] == nil || workerTelemetry["delivery_reward"] == nil {
+		t.Fatalf("telemetry lacks secure-grasp diagnostics: %#v", workerTelemetry)
+	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, "/api/scene", nil)
 	server.APIHandler().ServeHTTP(recorder, request)
@@ -95,5 +98,17 @@ func TestAPIServerRejectsRunningSceneUpdatesAndPublishesTelemetry(t *testing.T) 
 	}
 	if snapshot["type"] != "simulation_snapshot" {
 		t.Fatalf("telemetry = %#v", snapshot)
+	}
+}
+
+func TestObjectStatusRequiresPhysicalContact(t *testing.T) {
+	if status := objectStatus(forcecontrol.PhaseGripObject, true, false, false, false, false); status != "idle" {
+		t.Fatalf("closed gripper away from object reported %q, want idle", status)
+	}
+	if status := objectStatus(forcecontrol.PhaseGripObject, true, true, false, false, false); status != "grasping" {
+		t.Fatalf("contacting gripper reported %q, want grasping", status)
+	}
+	if status := objectStatus(forcecontrol.PhaseMoveToTarget, true, true, true, false, false); status != "transported" {
+		t.Fatalf("attached moving object reported %q, want transported", status)
 	}
 }

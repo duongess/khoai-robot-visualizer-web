@@ -109,6 +109,7 @@ func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
 
 	outside := NewTask(1, DefaultConfig())
 	_, _ = outside.Reset()
+	outside.environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
 	outside.environment.state.ObjectGrasped = true
 	outside.environment.state.Phase = PhaseReleaseObject
 	outside.environment.state.CarriageX = 1
@@ -133,9 +134,9 @@ func TestTimeoutAndResetClearEpisodeState(t *testing.T) {
 	if err != nil || !result.Done || result.Outcome != OutcomeFailure {
 		t.Fatalf("timeout=%#v error=%v", result, err)
 	}
-	task.environment.gripBonusAwarded, task.environment.wasEverGrasped, task.environment.failureReason = true, true, "timeout"
+	task.environment.gripBonusAwarded, task.environment.wasEverGrasped, task.environment.invalidGripPenaltyAwarded, task.environment.insufficientGripPenaltyAwarded, task.environment.emptyTargetPenaltyAwarded, task.environment.successRewardAwarded, task.environment.failureReason = true, true, true, true, true, true, "timeout"
 	_, _ = task.Reset()
-	if task.environment.gripBonusAwarded || task.environment.wasEverGrasped || task.environment.failureReason != "" || task.environment.state.EpisodeStep != 0 || task.environment.state.Phase != PhaseApproachObject {
+	if task.environment.gripBonusAwarded || task.environment.wasEverGrasped || task.environment.invalidGripPenaltyAwarded || task.environment.insufficientGripPenaltyAwarded || task.environment.emptyTargetPenaltyAwarded || task.environment.successRewardAwarded || task.environment.failureReason != "" || task.environment.state.EpisodeStep != 0 || task.environment.state.Phase != PhaseApproachObject || task.environment.state.Grip.ObjectAttached {
 		t.Fatalf("reset retained episode state: %#v", task.environment)
 	}
 }
@@ -233,13 +234,152 @@ func TestScriptedPickAndPlaceSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	advanceToPhase(t, task, PhaseReleaseObject)
-	result, err := task.Step(framework.Action{0, 0, -1})
-	if err != nil {
-		t.Fatal(err)
+	var result framework.StepResult
+	var err error
+	for step := 0; step < task.config.StablePlacementSteps+4; step++ {
+		result, err = task.Step(framework.Action{0, 0, -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Done {
+			break
+		}
 	}
 	if !result.Done || result.Outcome != OutcomeSuccess || task.environment.state.Phase != PhaseSuccess {
 		t.Fatalf("scripted episode did not succeed: result=%#v environment=%s", result, task.environment)
 	}
+}
+
+func TestReleasedObjectMustStabilizeBeforeSuccess(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	advanceToPhase(t, task, PhaseReleaseObject)
+	first, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Done || task.environment.state.Phase == PhaseSuccess {
+		t.Fatalf("release succeeded before the object stabilized: %#v", first)
+	}
+}
+
+func TestEmptyGripperAtTargetCannotAttachEarnDeliveryOrSucceed(t *testing.T) {
+	config := DefaultConfig()
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	// Regression for the dashboard screenshot: travel right, close with a
+	// numerically valid force, but never contact the left-side object.
+	for step := 0; step < 30 && task.environment.state.CarriageX < config.TargetX; step++ {
+		if _, err := task.Step(framework.Action{1, 0, -1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := task.Step(framework.Action{0, 0, 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grip := task.environment.state.Grip
+	if grip.ContactDetected || grip.ObjectAttached || task.environment.state.ObjectGrasped {
+		t.Fatalf("empty target close created a grasp: %#v", grip)
+	}
+	if result.Info["delivery_reward"] != 0 || result.Info["grip_reward"] != 0 || result.Outcome == OutcomeSuccess {
+		t.Fatalf("empty gripper earned target reward or success: %#v", result)
+	}
+	if result.Info["penalty_reward"] >= float32(config.Reward.TimePenalty) {
+		t.Fatalf("empty target did not receive its one-time penalty: %#v", result.Info)
+	}
+}
+
+func TestInsufficientForceAndContactlessForceDoNotAttach(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialGripperY = GraspHeight(config, config.Terrain[1].Y+config.ObjectHeight/2, config.InitialCarriageX)
+	near := NewTask(1, config)
+	_, _ = near.Reset()
+	result, err := near.Step(framework.Action{0, 0, -0.2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !near.environment.state.Grip.ContactDetected || near.environment.state.Grip.ObjectAttached || result.Info["grip_reward"] != 0 {
+		t.Fatalf("insufficient force attached object: state=%#v result=%#v", near.environment.state.Grip, result)
+	}
+
+	far := NewTask(1, DefaultConfig())
+	_, _ = far.Reset()
+	result, err = far.Step(framework.Action{0, 0, 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if far.environment.state.Grip.ContactDetected || far.environment.state.Grip.ObjectAttached || result.Info["grip_reward"] != 0 {
+		t.Fatalf("force without contact attached object: state=%#v result=%#v", far.environment.state.Grip, result)
+	}
+}
+
+func TestDeliveryRewardRequiresAttachedObject(t *testing.T) {
+	config := DefaultConfig()
+	empty := NewTask(1, config)
+	_, _ = empty.Reset()
+	empty.environment.state.Phase = PhaseMoveToTarget
+	empty.environment.state.CarriageX = 3
+	empty.environment.state.GripperY = 2
+	result, err := empty.Step(framework.Action{1, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Info["delivery_reward"] != 0 {
+		t.Fatalf("empty gripper received delivery reward: %#v", result.Info)
+	}
+
+	attached := attachedTask(t, config)
+	attached.environment.state.Phase = PhaseMoveToTarget
+	result, err = attached.Step(framework.Action{1, 0, 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Info["delivery_reward"] <= 0 {
+		t.Fatalf("attached object did not receive object-to-target progress: %#v", result.Info)
+	}
+}
+
+func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
+	task := attachedTask(t, DefaultConfig())
+	task.environment.state.Phase = PhaseMoveToTarget
+	result, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Done || result.Outcome != OutcomeFailure || result.Reward > float32(task.config.Reward.DroppedObjectPenalty) {
+		t.Fatalf("transport drop was not penalized: %#v", result)
+	}
+}
+
+func TestPhaseCannotSkipSecureAttachment(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	_, _ = task.Reset()
+	task.environment.state.Phase = PhaseGripObject
+	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.Phase != PhaseGripObject || task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("phase skipped secure attachment: %#v", task.environment.state)
+	}
+}
+
+func attachedTask(t *testing.T, config Config) *Task {
+	t.Helper()
+	config.InitialCarriageX = config.InitialObjectX
+	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil || !task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("could not establish valid attachment: state=%#v err=%v", task.environment.state.Grip, err)
+	}
+	return task
 }
 
 func TestRegisterStillWorks(t *testing.T) {

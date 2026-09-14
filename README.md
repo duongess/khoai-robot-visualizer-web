@@ -19,10 +19,22 @@ telemetry publishes the workspace, safe bounds, boundary flag, vertical
 action, velocity, reachable grasp height, and vertical error; the canvas uses
 those backend bounds rather than a separate viewport height.
 
-The coordinate/action schema is version 2. This learner currently has no
+## Secure grasp and reward model
+
+Closing the gripper or applying a sufficient force does not itself grasp an
+object. Attachment requires a closed gripper, physical contact within the
+configured horizontal and vertical grasp tolerances, and a force in the safe
+range. Before attachment, only object-approach and grasp-pose progress are
+rewarded. Delivery progress is strictly `previous object-to-target distance −
+current object-to-target distance` and is zero without attachment. Success
+requires a released object to settle inside the target zone for the configured
+number of steps. Telemetry exposes contact, attachment, object state, and each
+reward component for diagnosis.
+
+The coordinate/action/reward schema is version 3. This learner currently has no
 checkpoint-loading path. Any future loader must call
-`forcecontrol.ValidateCheckpointSchema`; v1 policies are rejected because they
-may have been trained with incompatible coordinate semantics.
+`forcecontrol.ValidateCheckpointSchema`; earlier policies and replay data must
+be discarded because they may contain exploitable reward transitions.
 
 ## Local development
 

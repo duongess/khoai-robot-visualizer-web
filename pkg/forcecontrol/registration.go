@@ -43,7 +43,7 @@ func validateRegistration(runtime *framework.Runtime, config Config) error {
 	if config.MaxGripForce <= 0 || config.MaxHorizontalSpeed <= 0 || config.MaxVerticalSpeed <= 0 || config.TimeStep <= 0 || config.MaxEpisodeSteps <= 0 {
 		return errors.New("force-control configuration must define positive speeds, grip force, time step, and episode length")
 	}
-	if config.ObjectWidth <= 0 || config.ObjectHeight <= 0 || config.TargetWidth <= 0 || config.ObjectFriction <= 0 || config.ObjectBreakForce <= 0 || config.HorizontalTolerance <= 0 || config.VerticalTolerance <= 0 || config.LiftClearance < 0 || config.ReleaseTolerance <= 0 {
+	if config.ObjectWidth <= 0 || config.ObjectHeight <= 0 || config.TargetWidth <= 0 || config.ObjectFriction <= 0 || config.ObjectBreakForce <= 0 || config.HorizontalTolerance <= 0 || config.VerticalTolerance <= 0 || config.GraspHorizontalTolerance <= 0 || config.GraspVerticalTolerance <= 0 || config.ClosedOpeningThreshold < 0 || config.ClosedOpeningThreshold > 1 || config.StableVelocityThreshold < 0 || config.StablePlacementSteps <= 0 || config.LiftClearance < 0 || config.ReleaseTolerance <= 0 {
 		return errors.New("force-control configuration contains invalid object, target, or phase tolerances")
 	}
 	if config.Workspace.MaxX <= config.Workspace.MinX || config.Workspace.MaxY <= config.Workspace.MinY || config.GripperWidth <= 0 || config.GripperBodyHeight <= 0 || config.GripperFingerLength < 0 || config.GripperClearance < 0 || config.RailY < config.Workspace.MinY || config.RailY > config.Workspace.MaxY {

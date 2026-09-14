@@ -8,11 +8,11 @@ import (
 )
 
 // ObservationDimension is the fixed goal-conditioned policy input size.
-const ObservationDimension = 20
+const ObservationDimension = 21
 
 // CoordinateSystemVersion changes whenever action meaning or observation
 // normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 2
+const CoordinateSystemVersion = 3
 
 const (
 	observationGripperX = iota
@@ -35,7 +35,29 @@ const (
 	observationRequiredGripForce
 	observationBreakForce
 	observationPhase
+	observationContactDetected
 )
+
+// GripState distinguishes a command to close the gripper from physical object
+// contact and a secure attachment. Force without contact is never a grasp.
+type GripState struct {
+	GripperClosed   bool
+	ContactDetected bool
+	ForceValid      bool
+	ObjectAttached  bool
+}
+
+// RewardBreakdown keeps every reward term observable so training behaviour can
+// be diagnosed without reverse engineering a scalar reward from telemetry.
+type RewardBreakdown struct {
+	Approach float64
+	Grip     float64
+	Lift     float64
+	Delivery float64
+	Success  float64
+	Penalty  float64
+	Total    float64
+}
 
 // Phase describes progress through one policy-controlled pick-and-place episode.
 type Phase int
@@ -89,27 +111,29 @@ func PhaseFromNormalized(value float32) Phase {
 
 // State is the authoritative physical and task state for one environment.
 type State struct {
-	CarriageX         float64
-	GripperY          float64
-	CarriageVelocityX float64
-	GripperVelocityY  float64
-	GripperOpening    float64
-	GripForce         float64
-	ObjectX           float64
-	ObjectY           float64
-	ObjectVelocityX   float64
-	ObjectVelocityY   float64
-	ObjectMass        float64
-	ObjectFriction    float64
-	ObjectBreakForce  float64
-	TargetX           float64
-	TargetY           float64
-	ObjectGrasped     bool
-	ObjectBroken      bool
-	ObjectPlaced      bool
-	BoundaryHit       bool
-	Phase             Phase
-	EpisodeStep       int
+	CarriageX            float64
+	GripperY             float64
+	CarriageVelocityX    float64
+	GripperVelocityY     float64
+	GripperOpening       float64
+	GripForce            float64
+	ObjectX              float64
+	ObjectY              float64
+	ObjectVelocityX      float64
+	ObjectVelocityY      float64
+	ObjectMass           float64
+	ObjectFriction       float64
+	ObjectBreakForce     float64
+	TargetX              float64
+	TargetY              float64
+	ObjectGrasped        bool
+	ObjectBroken         bool
+	ObjectPlaced         bool
+	PlacementStableSteps int
+	BoundaryHit          bool
+	Grip                 GripState
+	Phase                Phase
+	EpisodeStep          int
 }
 
 // Environment owns all mutable state for one independent task instance.
@@ -120,9 +144,14 @@ type Environment struct {
 	state  State
 	ready  bool
 
-	gripBonusAwarded bool
-	wasEverGrasped   bool
-	failureReason    string
+	gripBonusAwarded               bool
+	wasEverGrasped                 bool
+	invalidGripPenaltyAwarded      bool
+	insufficientGripPenaltyAwarded bool
+	emptyTargetPenaltyAwarded      bool
+	successRewardAwarded           bool
+	failureReason                  string
+	lastReward                     RewardBreakdown
 }
 
 func newEnvironment(seed int64, config Config) *Environment {
@@ -145,7 +174,15 @@ func (e *Environment) reset() State {
 		TargetY:          e.terrainHeight(e.config.TargetX),
 		Phase:            PhaseApproachObject,
 	}
-	e.gripBonusAwarded, e.wasEverGrasped, e.failureReason, e.ready = false, false, "", true
+	e.gripBonusAwarded = false
+	e.wasEverGrasped = false
+	e.invalidGripPenaltyAwarded = false
+	e.insufficientGripPenaltyAwarded = false
+	e.emptyTargetPenaltyAwarded = false
+	e.successRewardAwarded = false
+	e.failureReason = ""
+	e.lastReward = RewardBreakdown{}
+	e.ready = true
 	return e.state
 }
 
@@ -166,29 +203,40 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.applyHorizontalControl(values[0])
 	e.applyVerticalControl(values[1])
 	e.applyGripControl(values[2])
-	e.updateGraspState()
-	if e.state.ObjectGrasped {
+	e.updateGripState()
+	if e.state.Grip.ObjectAttached {
 		e.wasEverGrasped = true
 	}
 	e.updateObjectPhysics()
 	e.resolveTerrainCollision()
+	e.updatePlacementStability()
 	e.state.EpisodeStep++
 	if err := e.ValidateState(); err != nil {
 		e.failureReason, e.state.Phase = "invalid_state", PhaseFailure
-		return e.state, e.config.Reward.WorkspacePenalty, OutcomeFailure, true, nil
+		e.lastReward = RewardBreakdown{Penalty: e.config.Reward.WorkspacePenalty, Total: e.config.Reward.WorkspacePenalty}
+		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
 	}
 
 	terminalReason := e.detectFailure(previous)
 	if terminalReason != "" {
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
-		reward := e.reward(previous) + e.failurePenalty(terminalReason)
-		return e.state, reward, OutcomeFailure, true, nil
+		e.lastReward = e.reward(previous)
+		e.lastReward.Penalty += e.failurePenalty(terminalReason)
+		e.lastReward.Total += e.failurePenalty(terminalReason)
+		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
 	}
 	e.updatePhase(previous)
 	if e.state.Phase == PhaseSuccess {
-		return e.state, e.reward(previous) + e.config.Reward.SuccessfulPlacement, OutcomeSuccess, true, nil
+		e.lastReward = e.reward(previous)
+		if !e.successRewardAwarded {
+			e.lastReward.Success = e.config.Reward.SuccessfulPlacement
+			e.lastReward.Total += e.lastReward.Success
+			e.successRewardAwarded = true
+		}
+		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
-	return e.state, e.reward(previous), OutcomeRunning, false, nil
+	e.lastReward = e.reward(previous)
+	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
 }
 
 func (e *Environment) validatedAction(action []float32) ([3]float64, error) {
@@ -235,26 +283,45 @@ func (e *Environment) applyGripControl(value float64) {
 	e.state.GripForce = clamp((value+1)/2*e.config.MaxGripForce, 0, e.config.MaxGripForce)
 }
 
-func (e *Environment) updateGraspState() {
-	required := e.requiredForce()
-	horizontalOverlap := math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance
-	verticalClose := math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance
-	canGrasp := horizontalOverlap && verticalClose && e.state.GripperOpening <= 0.35 && e.state.GripForce >= required
-	if e.state.GripForce > e.state.ObjectBreakForce {
-		e.state.ObjectBroken, e.state.ObjectGrasped = true, false
-		return
+func (e *Environment) updateGripState() {
+	state := &e.state
+	contact := e.contactDetected()
+	// The attachment constraint keeps the object at the grasp point while it is
+	// held. It therefore remains in contact across one control integration step.
+	if state.Grip.ObjectAttached {
+		contact = true
 	}
-	if e.state.ObjectGrasped && e.state.GripForce < required {
-		e.state.ObjectGrasped = false
-		return
+	grip := GripState{
+		GripperClosed:   state.GripperOpening <= e.config.ClosedOpeningThreshold,
+		ContactDetected: contact,
 	}
-	if !e.state.ObjectGrasped && canGrasp {
-		e.state.ObjectGrasped = true
+	grip.ForceValid = state.GripForce >= e.requiredForce() && state.GripForce < state.ObjectBreakForce
+
+	// A force above the break threshold can damage an object only while the
+	// gripper is in contact with it or is already carrying it. Squeezing empty
+	// space must not mutate object state.
+	if (state.Grip.ObjectAttached || grip.ContactDetected) && state.GripForce >= state.ObjectBreakForce {
+		state.ObjectBroken = true
+		grip.ObjectAttached = false
+	} else if state.Grip.ObjectAttached {
+		grip.ObjectAttached = grip.GripperClosed && grip.ContactDetected && grip.ForceValid
+	} else {
+		grip.ObjectAttached = grip.GripperClosed && grip.ContactDetected && grip.ForceValid
 	}
+	state.Grip = grip
+	// Retained for callers compiled against the prior state struct. It is always
+	// identical to the physically meaningful ObjectAttached bit.
+	state.ObjectGrasped = grip.ObjectAttached
+}
+
+func (e *Environment) contactDetected() bool {
+	horizontalError := math.Abs(e.state.CarriageX - e.state.ObjectX)
+	verticalError := math.Abs(e.state.GripperY - e.objectGripHeight())
+	return horizontalError <= e.config.GraspHorizontalTolerance && verticalError <= e.config.GraspVerticalTolerance
 }
 
 func (e *Environment) updateObjectPhysics() {
-	if e.state.ObjectGrasped {
+	if e.state.Grip.ObjectAttached {
 		e.state.ObjectVelocityX, e.state.ObjectVelocityY = e.state.CarriageVelocityX, e.state.GripperVelocityY
 		e.state.ObjectX = e.state.CarriageX
 		e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
@@ -271,10 +338,18 @@ func (e *Environment) resolveTerrainCollision() {
 	if e.state.ObjectY <= minimumY {
 		e.state.ObjectY, e.state.ObjectVelocityY = minimumY, 0
 		e.state.ObjectVelocityX *= 0.8
-		if !e.state.ObjectGrasped && math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2 {
+		if !e.state.Grip.ObjectAttached && e.objectInsideTarget() {
 			e.state.ObjectPlaced = true
 		}
 	}
+}
+
+func (e *Environment) updatePlacementStability() {
+	if e.state.ObjectPlaced && !e.state.Grip.ObjectAttached && math.Abs(e.state.ObjectVelocityX) <= e.config.StableVelocityThreshold && math.Abs(e.state.ObjectVelocityY) <= e.config.StableVelocityThreshold {
+		e.state.PlacementStableSteps++
+		return
+	}
+	e.state.PlacementStableSteps = 0
 }
 
 func (e *Environment) detectFailure(previous State) string {
@@ -283,8 +358,10 @@ func (e *Environment) detectFailure(previous State) string {
 		return "object_break"
 	case e.objectOutOfBounds():
 		return "workspace_violation"
-	case previous.ObjectGrasped && !e.state.ObjectGrasped && previous.Phase != PhaseReleaseObject:
+	case previous.Grip.ObjectAttached && !e.state.Grip.ObjectAttached && previous.Phase != PhaseReleaseObject:
 		return "unsafe_drop"
+	case previous.Phase == PhaseReleaseObject && !e.state.Grip.ObjectAttached && !e.objectInsideTarget():
+		return "release_outside_target"
 	case e.state.EpisodeStep >= e.config.MaxEpisodeSteps:
 		return "timeout"
 	}
@@ -292,10 +369,6 @@ func (e *Environment) detectFailure(previous State) string {
 }
 
 func (e *Environment) updatePhase(previous State) {
-	if e.state.ObjectPlaced && previous.Phase == PhaseReleaseObject {
-		e.state.Phase = PhaseSuccess
-		return
-	}
 	switch previous.Phase {
 	case PhaseApproachObject:
 		if math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance {
@@ -306,51 +379,68 @@ func (e *Environment) updatePhase(previous State) {
 			e.state.Phase = PhaseGripObject
 		}
 	case PhaseGripObject:
-		if e.state.ObjectGrasped {
+		if e.state.Grip.ObjectAttached {
 			e.state.Phase = PhaseLiftObject
 		}
 	case PhaseLiftObject:
-		if e.state.ObjectGrasped && e.state.ObjectY >= e.requiredCarryHeight() {
+		if e.state.Grip.ObjectAttached && e.state.ObjectY >= e.requiredCarryHeight() {
 			e.state.Phase = PhaseMoveToTarget
 		}
 	case PhaseMoveToTarget:
-		if e.state.ObjectGrasped && math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2 {
+		if e.state.Grip.ObjectAttached && e.objectHorizontallyInsideTarget() {
 			e.state.Phase = PhaseLowerAtTarget
 		}
 	case PhaseLowerAtTarget:
-		if e.state.ObjectGrasped && e.state.GripperY <= e.targetReleaseGuideHeight()+e.config.ReleaseTolerance {
+		if e.state.Grip.ObjectAttached && e.objectHorizontallyInsideTarget() && e.state.GripperY <= e.targetReleaseGuideHeight()+e.config.ReleaseTolerance {
 			e.state.Phase = PhaseReleaseObject
+		}
+	case PhaseReleaseObject:
+		if !e.state.Grip.ObjectAttached && e.objectInsideTarget() && e.objectStable() {
+			e.state.Phase = PhaseSuccess
 		}
 	}
 }
 
-func (e *Environment) reward(previous State) float64 {
-	reward := e.config.Reward.TimePenalty
-	if previous.Phase == PhaseApproachObject && !e.state.ObjectGrasped {
-		reward += e.config.Reward.ApproachProgressScale * (gripperObjectDistance(previous) - gripperObjectDistance(e.state))
+func (e *Environment) reward(previous State) RewardBreakdown {
+	breakdown := RewardBreakdown{Penalty: e.config.Reward.TimePenalty}
+	attached := e.state.Grip.ObjectAttached
+	if previous.Phase == PhaseApproachObject && !attached {
+		breakdown.Approach = e.config.Reward.ApproachProgressScale * (gripperObjectDistance(previous) - gripperObjectDistance(e.state))
 	}
-	if previous.Phase == PhaseLowerToObject && !e.state.ObjectGrasped {
+	if previous.Phase == PhaseLowerToObject && !attached {
 		previousError := math.Abs(previous.GripperY - e.objectGripHeightFor(previous))
 		currentError := math.Abs(e.state.GripperY - e.objectGripHeight())
-		reward += e.config.Reward.LowerProgressScale * (previousError - currentError)
+		breakdown.Approach = e.config.Reward.LowerProgressScale * (previousError - currentError)
 	}
-	if e.state.ObjectGrasped && !e.gripBonusAwarded {
-		reward += e.config.Reward.SuccessfulGripReward
+	if attached && !e.gripBonusAwarded {
+		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
 	}
-	if previous.Phase == PhaseLiftObject && e.state.ObjectGrasped {
-		reward += e.config.Reward.LiftProgressScale * (e.state.ObjectY - previous.ObjectY)
+	if previous.Phase == PhaseLiftObject && previous.Grip.ObjectAttached && attached {
+		breakdown.Lift = e.config.Reward.LiftProgressScale * (e.state.ObjectY - previous.ObjectY)
 	}
-	if previous.Phase == PhaseMoveToTarget && previous.ObjectGrasped && e.state.ObjectGrasped {
-		reward += e.config.Reward.DeliveryProgressScale * (targetDistance(previous) - targetDistance(e.state))
+	// Delivery reward is intentionally impossible without a secure attachment.
+	// It is measured from object-to-target distance, never gripper-to-target.
+	if previous.Phase == PhaseMoveToTarget && previous.Grip.ObjectAttached && attached {
+		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * (targetDistance(previous) - targetDistance(e.state))
 	}
-	if previous.Phase == PhaseGripObject && !e.state.ObjectGrasped && e.state.GripForce < e.requiredForce() {
-		reward += e.config.Reward.InsufficientGripPenalty
+	if e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected && !e.invalidGripPenaltyAwarded {
+		breakdown.Penalty += e.config.Reward.InvalidGripPenalty
+		e.invalidGripPenaltyAwarded = true
+	}
+	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !e.state.Grip.ForceValid && !e.insufficientGripPenaltyAwarded {
+		breakdown.Penalty += e.config.Reward.InsufficientGripPenalty
+		e.insufficientGripPenaltyAwarded = true
+	}
+	if !attached && !e.wasEverGrasped && e.gripperInsideTarget() && !e.emptyTargetPenaltyAwarded {
+		breakdown.Penalty += e.config.Reward.EmptyTargetPenalty
+		e.emptyTargetPenaltyAwarded = true
 	}
 	if e.state.BoundaryHit {
-		reward += e.config.Reward.BoundaryCollisionPenalty
+		breakdown.Penalty += e.config.Reward.BoundaryCollisionPenalty
 	}
-	return reward
+	breakdown.Total = breakdown.Approach + breakdown.Grip + breakdown.Lift + breakdown.Delivery + breakdown.Penalty
+	return breakdown
 }
 
 func (e *Environment) failurePenalty(reason string) float64 {
@@ -359,6 +449,8 @@ func (e *Environment) failurePenalty(reason string) float64 {
 		return e.config.Reward.BreakPenalty
 	case "workspace_violation":
 		return e.config.Reward.WorkspacePenalty
+	case "unsafe_drop", "release_outside_target":
+		return e.config.Reward.DroppedObjectPenalty
 	default:
 		return e.config.Reward.UnsafeDropPenalty
 	}
@@ -382,11 +474,12 @@ func (e *Environment) observation() []float32 {
 		normalize(state.TargetX-state.ObjectX, -e.config.Workspace.MaxX, e.config.Workspace.MaxX),
 		normalize(state.TargetY-state.ObjectY, -e.config.Workspace.MaxY, e.config.Workspace.MaxY),
 		normalize01(1 - state.GripperOpening),
-		boolValue(state.ObjectGrasped),
+		boolValue(state.Grip.ObjectAttached),
 		normalize(state.GripForce, 0, e.config.MaxGripForce),
 		normalize(e.requiredForce(), 0, e.config.MaxGripForce),
 		normalize(state.ObjectBreakForce, 0, e.config.MaxGripForce),
 		normalize(float64(state.Phase), float64(PhaseIdle), float64(PhaseFailure)),
+		boolValue(state.Grip.ContactDetected),
 	}
 	result := make([]float32, len(values))
 	for index, value := range values {
@@ -455,6 +548,18 @@ func (e *Environment) ValidateState() error {
 
 func (e *Environment) requiredForce() float64 {
 	return e.state.ObjectMass * e.config.Gravity / (2 * e.state.ObjectFriction)
+}
+func (e *Environment) objectInsideTarget() bool {
+	return e.objectHorizontallyInsideTarget() && math.Abs(e.state.ObjectY-e.targetRestHeight()) <= e.config.ReleaseTolerance
+}
+func (e *Environment) objectHorizontallyInsideTarget() bool {
+	return math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2
+}
+func (e *Environment) gripperInsideTarget() bool {
+	return math.Abs(e.state.CarriageX-e.state.TargetX) <= e.config.TargetWidth/2
+}
+func (e *Environment) objectStable() bool {
+	return e.state.PlacementStableSteps >= e.config.StablePlacementSteps
 }
 func (e *Environment) objectOutOfBounds() bool {
 	return e.state.ObjectX < e.config.Workspace.MinX || e.state.ObjectX > e.config.Workspace.MaxX || e.state.ObjectY < e.config.Workspace.MinY-1 || e.state.ObjectY > e.config.Workspace.MaxY

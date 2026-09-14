@@ -46,6 +46,7 @@ export const RobotCanvas: React.FC = () => {
   } = useSimulationStore();
 
   const isPaused = runtimeStatus === 'paused';
+  const workspaceBounds = latestTelemetry?.worker.workspace ?? confirmedConfig.workspace ?? DEFAULT_WORLD_BOUNDS;
 
   // Active dragging state ref
   const dragTargetRef = useRef<SelectedEntityType>(null);
@@ -125,7 +126,7 @@ export const RobotCanvas: React.FC = () => {
       ctx.scale(dpr, dpr);
 
       // Compute fixed camera transform
-      const transform = getCanvasTransform(width, height, DEFAULT_WORLD_BOUNDS, 20);
+      const transform = getCanvasTransform(width, height, workspaceBounds, 20);
 
       // Smooth lerp when running
       const cur = renderStateRef.current;
@@ -149,17 +150,17 @@ export const RobotCanvas: React.FC = () => {
       ctx.strokeStyle = 'rgba(30, 41, 59, 0.4)';
       ctx.lineWidth = 1;
       const gridStepM = 0.5; // grid every 0.5 meters
-      for (let wx = DEFAULT_WORLD_BOUNDS.minX; wx <= DEFAULT_WORLD_BOUNDS.maxX; wx += gridStepM) {
-        const p1 = worldToCanvas({ x: wx, y: DEFAULT_WORLD_BOUNDS.minY }, transform);
-        const p2 = worldToCanvas({ x: wx, y: DEFAULT_WORLD_BOUNDS.maxY }, transform);
+      for (let wx = workspaceBounds.minX; wx <= workspaceBounds.maxX; wx += gridStepM) {
+        const p1 = worldToCanvas({ x: wx, y: workspaceBounds.minY }, transform);
+        const p2 = worldToCanvas({ x: wx, y: workspaceBounds.maxY }, transform);
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
         ctx.stroke();
       }
-      for (let wy = DEFAULT_WORLD_BOUNDS.minY; wy <= DEFAULT_WORLD_BOUNDS.maxY; wy += gridStepM) {
-        const p1 = worldToCanvas({ x: DEFAULT_WORLD_BOUNDS.minX, y: wy }, transform);
-        const p2 = worldToCanvas({ x: DEFAULT_WORLD_BOUNDS.maxX, y: wy }, transform);
+      for (let wy = workspaceBounds.minY; wy <= workspaceBounds.maxY; wy += gridStepM) {
+        const p1 = worldToCanvas({ x: workspaceBounds.minX, y: wy }, transform);
+        const p2 = worldToCanvas({ x: workspaceBounds.maxX, y: wy }, transform);
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
@@ -167,8 +168,8 @@ export const RobotCanvas: React.FC = () => {
       }
 
       // Workspace outer boundary frame
-      const frameTL = worldToCanvas({ x: DEFAULT_WORLD_BOUNDS.minX, y: DEFAULT_WORLD_BOUNDS.maxY }, transform);
-      const frameBR = worldToCanvas({ x: DEFAULT_WORLD_BOUNDS.maxX, y: DEFAULT_WORLD_BOUNDS.minY }, transform);
+      const frameTL = worldToCanvas({ x: workspaceBounds.minX, y: workspaceBounds.maxY }, transform);
+      const frameBR = worldToCanvas({ x: workspaceBounds.maxX, y: workspaceBounds.minY }, transform);
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
       ctx.lineWidth = 1.5;
       ctx.strokeRect(frameTL.x, frameTL.y, frameBR.x - frameTL.x, frameBR.y - frameTL.y);
@@ -177,7 +178,7 @@ export const RobotCanvas: React.FC = () => {
       ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
       ctx.font = '9px ui-monospace, monospace';
       ctx.textAlign = 'left';
-      ctx.fillText(`WORKSPACE: 6.0m × 3.2m [FIXED VIEWPORT]`, frameTL.x + 8, frameTL.y + 14);
+      ctx.fillText(`WORKSPACE: ${(workspaceBounds.maxX-workspaceBounds.minX).toFixed(1)}m × ${(workspaceBounds.maxY-workspaceBounds.minY).toFixed(1)}m [BACKEND]`, frameTL.x + 8, frameTL.y + 14);
 
       // 2. Editable 2D Terrain
       drawEditableTerrain({
@@ -277,7 +278,7 @@ export const RobotCanvas: React.FC = () => {
 
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    const transform = getCanvasTransform(width, height, DEFAULT_WORLD_BOUNDS, 20);
+    const transform = getCanvasTransform(width, height, workspaceBounds, 20);
 
     pointerDownPosRef.current = canvasPos;
 
@@ -378,7 +379,7 @@ export const RobotCanvas: React.FC = () => {
 
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    const transform = getCanvasTransform(width, height, DEFAULT_WORLD_BOUNDS, 20);
+    const transform = getCanvasTransform(width, height, workspaceBounds, 20);
 
     // If dragging an entity, update draft state immediately in world coordinates
     if (dragTargetRef.current) {
@@ -388,11 +389,11 @@ export const RobotCanvas: React.FC = () => {
         case 'object': {
           // Clamp object within world horizontal bounds
           const halfW = draftConfig.object.width / 2;
-          const clampedX = Math.min(5.4, Math.max(0.6, worldPos.x));
+          const clampedX = Math.min(workspaceBounds.maxX-halfW, Math.max(workspaceBounds.minX+halfW, worldPos.x));
           // Clamp Y to be above terrain
           const terrainY = getTerrainHeightAt(clampedX, draftConfig.terrain.points);
           const minY = terrainY + draftConfig.object.height / 2;
-          const clampedY = Math.min(2.4, Math.max(minY, worldPos.y));
+          const clampedY = Math.min(workspaceBounds.maxY-draftConfig.object.height/2, Math.max(minY, worldPos.y));
 
           updateDraftObject({
             position_x: Number(clampedX.toFixed(2)),
@@ -413,10 +414,9 @@ export const RobotCanvas: React.FC = () => {
         }
 
         case 'gripper': {
-          // Can adjust gripper vertical height Y, and optionally follow carriage X
-          const terrainY = getTerrainHeightAt(draftConfig.gantry.carriage_x, draftConfig.terrain.points);
-          const minY = terrainY + 0.3;
-          const maxY = draftConfig.gantry.rail_y - 0.25;
+          // These limits originate with the backend's physical gripper model.
+          const minY = draftConfig.gantry.min_y;
+          const maxY = draftConfig.gantry.max_y;
           const clampedY = Math.min(maxY, Math.max(minY, worldPos.y));
           updateDraftGantry({
             gripper_y: Number(clampedY.toFixed(2)),
@@ -425,7 +425,11 @@ export const RobotCanvas: React.FC = () => {
         }
 
         case 'target': {
-          const clampedX = Math.min(5.3, Math.max(0.7, worldPos.x));
+          const halfWidth = draftConfig.target.width / 2;
+          const clampedX = Math.min(
+            workspaceBounds.maxX - halfWidth,
+            Math.max(workspaceBounds.minX + halfWidth, worldPos.x),
+          );
           updateDraftTarget({
             position_x: Number(clampedX.toFixed(2)),
           });
@@ -450,8 +454,7 @@ export const RobotCanvas: React.FC = () => {
             clampedX = Math.min(maxAllowedX, Math.max(minAllowedX, worldPos.x));
           }
 
-          // Clamping Y between 0.1m and 1.6m
-          const clampedY = Math.min(1.6, Math.max(0.12, worldPos.y));
+		  const clampedY = Math.min(workspaceBounds.maxY, Math.max(workspaceBounds.minY, worldPos.y));
 
           pts[idx] = {
             id: ptId,
@@ -585,7 +588,7 @@ export const RobotCanvas: React.FC = () => {
 
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
-    const transform = getCanvasTransform(width, height, DEFAULT_WORLD_BOUNDS, 20);
+    const transform = getCanvasTransform(width, height, workspaceBounds, 20);
 
     const hitSurface = hitTestTerrainSurface(canvasPos, draftConfig.terrain.points, transform);
     if (hitSurface) {

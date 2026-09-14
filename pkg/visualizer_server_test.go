@@ -60,6 +60,17 @@ func TestAPIServerRejectsRunningSceneUpdatesAndPublishesTelemetry(t *testing.T) 
 	if workerTelemetry["task_phase"] == "idle" {
 		t.Fatalf("reset task phase remained idle: %#v", workerTelemetry)
 	}
+	workspace := workerTelemetry["workspace"].(map[string]any)
+	if workspace["maxY"] != config.Workspace.MaxY || workspace["minY"] != config.Workspace.MinY {
+		t.Fatalf("telemetry did not publish authoritative workspace: %#v", workspace)
+	}
+	gantry := workerTelemetry["gantry"].(map[string]any)
+	if gantry["gripper_y"].(float64) > workspace["maxY"].(float64) || gantry["gripper_y"].(float64) < workspace["minY"].(float64) {
+		t.Fatalf("telemetry exposed gripper outside workspace: gantry=%#v workspace=%#v", gantry, workspace)
+	}
+	if workerTelemetry["latest_vertical_action"] == nil || workerTelemetry["target_grasp_y"] == nil || workerTelemetry["vertical_error"] == nil {
+		t.Fatalf("telemetry lacks vertical diagnostics: %#v", workerTelemetry)
+	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, "/api/scene", nil)
 	server.APIHandler().ServeHTTP(recorder, request)

@@ -34,6 +34,9 @@ func (t *Task) Reset() (framework.State, error) {
 		return nil, errors.New("force-control task is not initialized")
 	}
 	t.environment.reset()
+	if err := t.environment.ValidateState(); err != nil {
+		return nil, err
+	}
 	return t.environment.observation(), nil
 }
 
@@ -45,5 +48,9 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 	if err != nil {
 		return framework.StepResult{}, err
 	}
-	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done}, nil
+	boundaryHit := float32(0)
+	if t.environment.state.BoundaryHit {
+		boundaryHit = 1
+	}
+	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done, Info: map[string]float32{"boundary_hit": boundaryHit, "coordinate_system_version": CoordinateSystemVersion}}, nil
 }

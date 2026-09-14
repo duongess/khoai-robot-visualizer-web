@@ -75,7 +75,7 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 
 func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	config := DefaultConfig()
-	config.InitialGripperY = config.Terrain[1].Y + config.ObjectHeight
+	config.InitialGripperY = GraspHeight(config, config.Terrain[1].Y+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	_, _ = task.Reset()
 	grip, err := task.Step(framework.Action{0, 0, 0.5})
@@ -137,6 +137,93 @@ func TestTimeoutAndResetClearEpisodeState(t *testing.T) {
 	_, _ = task.Reset()
 	if task.environment.gripBonusAwarded || task.environment.wasEverGrasped || task.environment.failureReason != "" || task.environment.state.EpisodeStep != 0 || task.environment.state.Phase != PhaseApproachObject {
 		t.Fatalf("reset retained episode state: %#v", task.environment)
+	}
+}
+
+func TestVerticalDirectionAndPhysicalWorkspaceClipping(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialGripperY = SafeGripperBounds(config, config.InitialCarriageX).MaxY
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	top := task.environment.state.GripperY
+	up, err := task.Step(framework.Action{0, 1, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.GripperY != top || task.environment.state.GripperVelocityY != 0 || !task.environment.state.BoundaryHit || up.Info["boundary_hit"] != 1 {
+		t.Fatalf("positive Y should clip at top: state=%#v info=%v", task.environment.state, up.Info)
+	}
+	down, err := task.Step(framework.Action{0, -1, -1})
+	if err != nil || task.environment.state.GripperY >= top || task.environment.state.GripperVelocityY >= 0 || down.Info["boundary_hit"] != 0 {
+		t.Fatalf("negative Y should move down: state=%#v result=%#v err=%v", task.environment.state, down, err)
+	}
+
+	for step := 0; step < 100; step++ {
+		if _, err := task.Step(framework.Action{0, -1, -1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bounds := SafeGripperBounds(config, task.environment.state.CarriageX)
+	if task.environment.state.GripperY != bounds.MinY || task.environment.state.GripperVelocityY != 0 || !task.environment.state.BoundaryHit {
+		t.Fatalf("negative Y escaped lower bound: state=%#v bounds=%#v", task.environment.state, bounds)
+	}
+}
+
+func TestHorizontalMovementCannotLeavePhysicalWorkspace(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = SafeGripperBounds(config, config.InitialCarriageX).MaxX
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	right, err := task.Step(framework.Action{1, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := SafeGripperBounds(config, task.environment.state.CarriageX)
+	if task.environment.state.CarriageX != bounds.MaxX || task.environment.state.CarriageVelocityX != 0 || right.Info["boundary_hit"] != 1 {
+		t.Fatalf("positive X escaped upper bound: state=%#v bounds=%#v", task.environment.state, bounds)
+	}
+}
+
+func TestLoweringTowardReachableGraspHeightRewardsProgress(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX
+	config.InitialGripperY = 1.2
+	toward, away := NewTask(1, config), NewTask(1, config)
+	_, _ = toward.Reset()
+	_, _ = away.Reset()
+	toward.environment.state.Phase = PhaseLowerToObject
+	away.environment.state.Phase = PhaseLowerToObject
+	down, err := toward.Step(framework.Action{0, -1, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, err := away.Step(framework.Action{0, 1, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if down.Reward <= up.Reward {
+		t.Fatalf("lowering reward %v <= upward reward %v", down.Reward, up.Reward)
+	}
+}
+
+func TestInvalidInitialStateIsRejected(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialGripperY = config.Workspace.MaxY
+	if err := Register(framework.NewRuntime(), config); err == nil {
+		t.Fatal("expected initial gripper outside physical bounds to be rejected")
+	}
+}
+
+func TestCheckpointSchemaRejectsPriorCoordinateSemantics(t *testing.T) {
+	if err := ValidateCheckpointSchema(CoordinateSystemVersion - 1); err == nil {
+		t.Fatal("expected incompatible checkpoint schema to be rejected")
+	}
+	if err := ValidateCheckpointSchema(CoordinateSystemVersion); err != nil {
+		t.Fatalf("current checkpoint schema rejected: %v", err)
 	}
 }
 

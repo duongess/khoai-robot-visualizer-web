@@ -2,6 +2,28 @@
 
 The visualizer is a React/Vite dashboard served by one Go binary. It calls the sibling control framework through direct Go package imports; only the framework communicates with the local Python SAC learner over gRPC.
 
+## Coordinate and safety model
+
+The Go environment is the authoritative source of physical coordinates. Its
+default workspace is `[0, 6] m × [0, 3.2] m`; world X increases rightward and
+world Y increases upward from the floor. A positive vertical policy action
+moves the gripper up, and a negative action moves it down. Canvas Y increases
+downward, so the React renderer performs the one world-to-canvas Y inversion.
+
+The gripper reference point is constrained using its configured width, body
+height, finger length, and clearance. The default safe limits are X `[0.275,
+5.725]` and Y `[0.65, 3.04]` at the initial carriage position (the lower Y
+limit follows terrain as the carriage moves). Boundary impacts clamp position,
+zero the outward velocity, and add a configurable negative reward. Runtime
+telemetry publishes the workspace, safe bounds, boundary flag, vertical
+action, velocity, reachable grasp height, and vertical error; the canvas uses
+those backend bounds rather than a separate viewport height.
+
+The coordinate/action schema is version 2. This learner currently has no
+checkpoint-loading path. Any future loader must call
+`forcecontrol.ValidateCheckpointSchema`; v1 policies are rejected because they
+may have been trained with incompatible coordinate semantics.
+
 ## Local development
 
 From the common parent directory, use the included Go workspace so both sibling modules resolve locally:

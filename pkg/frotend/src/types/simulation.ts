@@ -88,6 +88,7 @@ export interface TerrainConfig {
 }
 
 export interface SceneConfig {
+	workspace?: WorldBounds & { coordinate_system_version?: number };
   object: ObjectConfig;
   gantry: GantryConfig;
   terrain: TerrainConfig;
@@ -173,6 +174,14 @@ export interface WorkerState {
     position_y?: number;
     width: number;
   };
+  workspace?: WorldBounds & {
+    safeMinX: number;
+    safeMaxX: number;
+    safeMinY: number;
+    safeMaxY: number;
+    boundaryHit: boolean;
+    coordinate_system_version: number;
+  };
   terrain: {
     points: TerrainPoint[];
   };
@@ -185,6 +194,10 @@ export interface WorkerState {
   distance_to_target?: number;
   done: boolean;
   outcome: string;
+  latest_vertical_action?: number;
+  velocity_y?: number;
+  target_grasp_y?: number;
+  vertical_error?: number;
 }
 
 export interface SimulationSnapshot {

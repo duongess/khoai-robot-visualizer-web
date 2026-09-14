@@ -2,6 +2,7 @@ package forcecontrol
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/duongess/khoai-robot-control-framework/pkg/framework"
 )
@@ -44,6 +45,19 @@ func validateRegistration(runtime *framework.Runtime, config Config) error {
 	}
 	if config.ObjectWidth <= 0 || config.ObjectHeight <= 0 || config.TargetWidth <= 0 || config.ObjectFriction <= 0 || config.ObjectBreakForce <= 0 || config.HorizontalTolerance <= 0 || config.VerticalTolerance <= 0 || config.LiftClearance < 0 || config.ReleaseTolerance <= 0 {
 		return errors.New("force-control configuration contains invalid object, target, or phase tolerances")
+	}
+	if config.Workspace.MaxX <= config.Workspace.MinX || config.Workspace.MaxY <= config.Workspace.MinY || config.GripperWidth <= 0 || config.GripperBodyHeight <= 0 || config.GripperFingerLength < 0 || config.GripperClearance < 0 || config.RailY < config.Workspace.MinY || config.RailY > config.Workspace.MaxY {
+		return errors.New("force-control configuration contains invalid workspace or gripper geometry")
+	}
+	for _, point := range config.Terrain {
+		if point.X < config.Workspace.MinX || point.X > config.Workspace.MaxX || point.Y < config.Workspace.MinY || point.Y+config.GripperFingerLength+config.GripperClearance > config.Workspace.MaxY {
+			return errors.New("force-control terrain lies outside the usable workspace")
+		}
+	}
+	probe := newEnvironment(config.Seed, config)
+	probe.reset()
+	if err := probe.ValidateState(); err != nil {
+		return fmt.Errorf("force-control initial state is invalid: %w", err)
 	}
 	return nil
 }

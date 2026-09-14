@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/duongess/khoai-robot-control-framework/pkg/framework"
 	"github.com/duongess/khoai-robot-visualizer-web/pkg"
 	"github.com/duongess/khoai-robot-visualizer-web/pkg/forcecontrol"
 )
@@ -20,8 +21,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	environment := forcecontrol.New(42)
-	environment.Reset()
+	runtime := framework.NewRuntime()
+	if err := forcecontrol.Register(runtime, forcecontrol.DefaultConfig()); err != nil {
+		log.Fatalf("register force-control task: %v", err)
+	}
 
 	uiHandler, err := pkg.NewUIHandler()
 	if err != nil {
@@ -29,7 +32,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/", apiHandler(environment))
+	mux.Handle("/api/", apiHandler())
 	// Reserve the WebSocket route so it cannot be handled by the SPA fallback.
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "WebSocket telemetry is not configured", http.StatusNotImplemented)
@@ -64,7 +67,7 @@ func main() {
 	}
 }
 
-func apiHandler(_ *forcecontrol.Environment) http.Handler {
+func apiHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/status" {
 			writeJSON(w, http.StatusOK, map[string]string{"status": "running"})

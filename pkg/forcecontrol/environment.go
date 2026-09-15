@@ -695,7 +695,11 @@ func (e *Environment) ValidateState() error {
 }
 
 func (e *Environment) requiredForce() float64 {
-	return e.state.ObjectMass * (e.config.Gravity + math.Max(0, e.verticalAcceleration)) / (2 * e.state.ObjectFriction)
+	// The clamp band is fixed for an episode: only the configured object mass,
+	// gravity, and friction determine its lower edge. Vertical acceleration is
+	// still exposed as telemetry, but must not make the displayed requirement or
+	// safe force range jump between simulation steps.
+	return e.state.ObjectMass * e.config.Gravity / (2 * e.state.ObjectFriction)
 }
 
 func (e *Environment) slipSeverity() float64 {

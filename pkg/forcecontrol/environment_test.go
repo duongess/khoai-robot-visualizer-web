@@ -393,21 +393,20 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	}
 }
 
-func TestContinuousPolicyForceRespondsToSlipDuringLift(t *testing.T) {
+func TestFixedGripRangeDoesNotChangeDuringLift(t *testing.T) {
 	task := attachedTask(t, DefaultConfig())
-	baseForce := task.environment.state.GripForce
-	result, err := task.Step(framework.Action{0, 1, 0})
-	if err != nil || result.Done || !task.environment.state.Grip.Slipping || result.Info["slip_severity"] <= 0 {
-		t.Fatalf("lift without added force did not expose recoverable slip: result=%#v state=%#v err=%v", result, task.environment.state.Grip, err)
-	}
-	for step := 0; step < task.config.SlipDetachFrames-1 && task.environment.state.Grip.Slipping; step++ {
-		result, err = task.Step(framework.Action{0, 1, 1})
+	fixedRequiredForce := task.environment.requiredForce()
+	for step := 0; step < 4; step++ {
+		result, err := task.Step(framework.Action{0, 1, 0})
 		if err != nil || result.Done {
-			t.Fatalf("policy could not recover slip at step %d: result=%#v err=%v", step, result, err)
+			t.Fatalf("lift failed at step %d: result=%#v err=%v", step, result, err)
+		}
+		if task.environment.requiredForce() != fixedRequiredForce || result.Info["required_grip_force"] != float32(fixedRequiredForce) {
+			t.Fatalf("required force changed during lift: got=%v want=%v", task.environment.requiredForce(), fixedRequiredForce)
 		}
 	}
-	if task.environment.state.Grip.Slipping || !task.environment.state.Grip.ObjectAttached || task.environment.state.GripForce <= baseForce {
-		t.Fatalf("increased policy force did not recover stable lift: %#v", task.environment.state)
+	if task.environment.state.Grip.Slipping || !task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("fixed safe force should keep the object attached: %#v", task.environment.state)
 	}
 }
 

@@ -4,21 +4,23 @@ import "math"
 
 // RewardConfig contains the reward-shaping constants for one episode.
 type RewardConfig struct {
-	TimePenalty              float64
-	ApproachProgressScale    float64
-	SuccessfulGripReward     float64
-	LiftProgressScale        float64
-	DeliveryProgressScale    float64
-	SuccessfulPlacement      float64
-	UnsafeDropPenalty        float64
-	BreakPenalty             float64
-	WorkspacePenalty         float64
-	InsufficientGripPenalty  float64
-	InvalidGripPenalty       float64
-	EmptyTargetPenalty       float64
-	DroppedObjectPenalty     float64
-	BoundaryCollisionPenalty float64
-	LowerProgressScale       float64
+	TimePenalty                 float64
+	ApproachProgressScale       float64
+	SuccessfulGripReward        float64
+	LiftProgressScale           float64
+	DeliveryProgressScale       float64
+	SuccessfulPlacement         float64
+	UnsafeDropPenalty           float64
+	BreakPenalty                float64
+	WorkspacePenalty            float64
+	InsufficientGripPenalty     float64
+	InsufficientGripStepPenalty float64
+	GripForceProgressScale      float64
+	InvalidGripPenalty          float64
+	EmptyTargetPenalty          float64
+	DroppedObjectPenalty        float64
+	BoundaryCollisionPenalty    float64
+	LowerProgressScale          float64
 }
 
 // WorkspaceBounds is the authoritative physical coordinate system. World Y is
@@ -52,6 +54,7 @@ type Config struct {
 	MaxHorizontalSpeed       float64
 	MaxVerticalSpeed         float64
 	MaxGripForce             float64
+	MaxGripForceRate         float64
 	TimeStep                 float64
 	Gravity                  float64
 	ObjectWidth              float64
@@ -92,6 +95,7 @@ func DefaultConfig() Config {
 		MaxHorizontalSpeed:       1.5,
 		MaxVerticalSpeed:         1.5,
 		MaxGripForce:             20,
+		MaxGripForceRate:         40,
 		TimeStep:                 0.1,
 		Gravity:                  9.81,
 		ObjectWidth:              0.35,
@@ -116,21 +120,23 @@ func DefaultConfig() Config {
 		ReleaseTolerance:         0.08,
 		ActionDeadZone:           0.03,
 		Reward: RewardConfig{
-			TimePenalty:              -0.001,
-			ApproachProgressScale:    1.0,
-			SuccessfulGripReward:     5.0,
-			LiftProgressScale:        2.0,
-			DeliveryProgressScale:    3.0,
-			SuccessfulPlacement:      50.0,
-			UnsafeDropPenalty:        -10.0,
-			BreakPenalty:             -20.0,
-			WorkspacePenalty:         -20.0,
-			InsufficientGripPenalty:  -1.0,
-			InvalidGripPenalty:       -1.0,
-			EmptyTargetPenalty:       -2.0,
-			DroppedObjectPenalty:     -10.0,
-			BoundaryCollisionPenalty: -0.25,
-			LowerProgressScale:       1.0,
+			TimePenalty:                 -0.001,
+			ApproachProgressScale:       1.0,
+			SuccessfulGripReward:        5.0,
+			LiftProgressScale:           2.0,
+			DeliveryProgressScale:       3.0,
+			SuccessfulPlacement:         50.0,
+			UnsafeDropPenalty:           -10.0,
+			BreakPenalty:                -20.0,
+			WorkspacePenalty:            -20.0,
+			InsufficientGripPenalty:     -1.0,
+			InsufficientGripStepPenalty: -0.05,
+			GripForceProgressScale:      0.5,
+			InvalidGripPenalty:          -1.0,
+			EmptyTargetPenalty:          -2.0,
+			DroppedObjectPenalty:        -10.0,
+			BoundaryCollisionPenalty:    -0.25,
+			LowerProgressScale:          1.0,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},
 	}

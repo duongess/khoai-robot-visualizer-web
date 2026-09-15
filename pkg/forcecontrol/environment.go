@@ -12,7 +12,7 @@ const ObservationDimension = 21
 
 // CoordinateSystemVersion changes whenever action meaning or observation
 // normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 3
+const CoordinateSystemVersion = 5
 
 const (
 	observationGripperX = iota
@@ -280,7 +280,16 @@ func (e *Environment) applyVerticalControl(value float64) {
 
 func (e *Environment) applyGripControl(value float64) {
 	e.state.GripperOpening = clamp((1-value)/2, 0, 1)
-	e.state.GripForce = clamp((value+1)/2*e.config.MaxGripForce, 0, e.config.MaxGripForce)
+	// Opening is a deliberate, immediate release. Closing approaches the
+	// requested force at a bounded physical rate, preventing noisy policy
+	// outputs from jumping directly from zero to the break threshold.
+	if e.state.GripperOpening > e.config.ClosedOpeningThreshold {
+		e.state.GripForce = 0
+		return
+	}
+	targetForce := clamp((value+1)/2*e.config.MaxGripForce, 0, e.config.MaxGripForce)
+	maximumDelta := e.config.MaxGripForceRate * e.config.TimeStep
+	e.state.GripForce += clamp(targetForce-e.state.GripForce, -maximumDelta, maximumDelta)
 }
 
 func (e *Environment) updateGripState() {
@@ -375,11 +384,17 @@ func (e *Environment) updatePhase(previous State) {
 			e.state.Phase = PhaseLowerToObject
 		}
 	case PhaseLowerToObject:
-		if math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance {
+		if math.Abs(e.state.CarriageX-e.state.ObjectX) > e.config.HorizontalTolerance {
+			e.state.Phase = PhaseApproachObject
+		} else if math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance {
 			e.state.Phase = PhaseGripObject
 		}
 	case PhaseGripObject:
-		if e.state.Grip.ObjectAttached {
+		if math.Abs(e.state.CarriageX-e.state.ObjectX) > e.config.HorizontalTolerance {
+			e.state.Phase = PhaseApproachObject
+		} else if math.Abs(e.state.GripperY-e.objectGripHeight()) > e.config.VerticalTolerance {
+			e.state.Phase = PhaseLowerToObject
+		} else if e.state.Grip.ObjectAttached {
 			e.state.Phase = PhaseLiftObject
 		}
 	case PhaseLiftObject:
@@ -408,8 +423,8 @@ func (e *Environment) reward(previous State) RewardBreakdown {
 		breakdown.Approach = e.config.Reward.ApproachProgressScale * (gripperObjectDistance(previous) - gripperObjectDistance(e.state))
 	}
 	if previous.Phase == PhaseLowerToObject && !attached {
-		previousError := math.Abs(previous.GripperY - e.objectGripHeightFor(previous))
-		currentError := math.Abs(e.state.GripperY - e.objectGripHeight())
+		previousError := e.graspPoseDistanceFor(previous)
+		currentError := e.graspPoseDistanceFor(e.state)
 		breakdown.Approach = e.config.Reward.LowerProgressScale * (previousError - currentError)
 	}
 	if attached && !e.gripBonusAwarded {
@@ -428,9 +443,19 @@ func (e *Environment) reward(previous State) RewardBreakdown {
 		breakdown.Penalty += e.config.Reward.InvalidGripPenalty
 		e.invalidGripPenaltyAwarded = true
 	}
-	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !e.state.Grip.ForceValid && !e.insufficientGripPenaltyAwarded {
-		breakdown.Penalty += e.config.Reward.InsufficientGripPenalty
-		e.insufficientGripPenaltyAwarded = true
+	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !attached {
+		// Force must converge to the attachment threshold. Signed progress makes
+		// oscillating above and below the threshold non-profitable, while the
+		// configured per-step cost prevents an indefinitely slipping grip from
+		// becoming a cheap terminal policy.
+		previousGap := math.Max(0, e.requiredForce()-previous.GripForce)
+		currentGap := math.Max(0, e.requiredForce()-e.state.GripForce)
+		breakdown.Grip += e.config.Reward.GripForceProgressScale * (previousGap - currentGap)
+		if !e.state.Grip.ForceValid && !e.insufficientGripPenaltyAwarded {
+			breakdown.Penalty += e.config.Reward.InsufficientGripPenalty
+			e.insufficientGripPenaltyAwarded = true
+		}
+		breakdown.Penalty += e.config.Reward.InsufficientGripStepPenalty
 	}
 	if !attached && !e.wasEverGrasped && e.gripperInsideTarget() && !e.emptyTargetPenaltyAwarded {
 		breakdown.Penalty += e.config.Reward.EmptyTargetPenalty
@@ -502,6 +527,10 @@ func (e *Environment) targetRestHeight() float64 { return e.state.TargetY + e.co
 func (e *Environment) targetReleaseGuideHeight() float64 {
 	return GraspHeight(e.config, e.targetRestHeight(), e.state.CarriageX)
 }
+func (e *Environment) graspPoseDistanceFor(state State) float64 {
+	return math.Hypot(state.CarriageX-state.ObjectX, state.GripperY-e.objectGripHeightFor(state))
+}
+
 func (e *Environment) requiredCarryHeight() float64 {
 	return math.Max(e.terrainHeight(e.state.ObjectX), e.state.TargetY) + e.config.ObjectHeight/2 + e.config.LiftClearance
 }

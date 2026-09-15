@@ -78,9 +78,16 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	config.InitialGripperY = GraspHeight(config, config.Terrain[1].Y+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	_, _ = task.Reset()
-	grip, err := task.Step(framework.Action{0, 0, 0.5})
-	if err != nil || !task.environment.state.ObjectGrasped {
-		t.Fatalf("safe grip result=%#v error=%v", grip, err)
+	var grip framework.StepResult
+	var err error
+	for step := 0; step < 10 && !task.environment.state.ObjectGrasped; step++ {
+		grip, err = task.Step(framework.Action{0, 0, 0.5})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !task.environment.state.ObjectGrasped {
+		t.Fatalf("safe grip did not reach attachment force: %#v", grip)
 	}
 	again, err := task.Step(framework.Action{0, 0, 0.5})
 	if err != nil {
@@ -92,8 +99,14 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 
 	broken := NewTask(1, config)
 	_, _ = broken.Reset()
-	result, err := broken.Step(framework.Action{0, 0, 1})
-	if err != nil || !result.Done || result.Outcome != OutcomeFailure {
+	var result framework.StepResult
+	for step := 0; step < 10 && !result.Done; step++ {
+		result, err = broken.Step(framework.Action{0, 0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !result.Done || result.Outcome != OutcomeFailure {
 		t.Fatalf("break result=%#v error=%v", result, err)
 	}
 }
@@ -219,6 +232,14 @@ func TestInvalidInitialStateIsRejected(t *testing.T) {
 	}
 }
 
+func TestRegistrationRejectsImpossibleSafeGripBand(t *testing.T) {
+	config := DefaultConfig()
+	config.ObjectBreakForce = 10 // below the configured 11.21 N required force
+	if err := Register(framework.NewRuntime(), config); err == nil {
+		t.Fatal("expected an impossible safe grip-force interval to be rejected")
+	}
+}
+
 func TestCheckpointSchemaRejectsPriorCoordinateSemantics(t *testing.T) {
 	if err := ValidateCheckpointSchema(CoordinateSystemVersion - 1); err == nil {
 		t.Fatal("expected incompatible checkpoint schema to be rejected")
@@ -318,6 +339,49 @@ func TestInsufficientForceAndContactlessForceDoNotAttach(t *testing.T) {
 	}
 }
 
+func TestSustainedInsufficientContactForceIsNotAFreePolicy(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX
+	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseGripObject
+	if _, err := task.Step(framework.Action{0, 0, -0.2}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := task.Step(framework.Action{0, 0, -0.2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Info["penalty_reward"] >= float32(config.Reward.TimePenalty) || second.Reward >= 0 {
+		t.Fatalf("sustained insufficient force should receive a step penalty: %#v", second)
+	}
+}
+
+func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX
+	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
+		t.Fatal(err)
+	}
+	if got, limit := task.environment.state.GripForce, config.MaxGripForceRate*config.TimeStep; got != limit {
+		t.Fatalf("first grip-force increment = %v, want rate-limited %v", got, limit)
+	}
+	if _, err := task.Step(framework.Action{0, 0, -1}); err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.GripForce != 0 || task.environment.state.Grip.GripperClosed {
+		t.Fatalf("open command did not immediately release: %#v", task.environment.state.Grip)
+	}
+}
+
 func TestDeliveryRewardRequiresAttachedObject(t *testing.T) {
 	config := DefaultConfig()
 	empty := NewTask(1, config)
@@ -363,7 +427,7 @@ func TestPhaseCannotSkipSecureAttachment(t *testing.T) {
 	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 		t.Fatal(err)
 	}
-	if task.environment.state.Phase != PhaseGripObject || task.environment.state.Grip.ObjectAttached {
+	if task.environment.state.Phase == PhaseLiftObject || task.environment.state.Grip.ObjectAttached {
 		t.Fatalf("phase skipped secure attachment: %#v", task.environment.state)
 	}
 }
@@ -376,8 +440,13 @@ func attachedTask(t *testing.T, config Config) *Task {
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil || !task.environment.state.Grip.ObjectAttached {
-		t.Fatalf("could not establish valid attachment: state=%#v err=%v", task.environment.state.Grip, err)
+	for step := 0; step < 10 && !task.environment.state.Grip.ObjectAttached; step++ {
+		if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
+			t.Fatalf("could not establish valid attachment: state=%#v err=%v", task.environment.state.Grip, err)
+		}
+	}
+	if !task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("could not establish valid attachment: state=%#v", task.environment.state.Grip)
 	}
 	return task
 }

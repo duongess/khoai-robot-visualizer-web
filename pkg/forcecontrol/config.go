@@ -2,6 +2,51 @@ package forcecontrol
 
 import "math"
 
+// HomeostasisConfig defines the environment-owned energy reserve. Energy is a
+// small motivation signal, not a replacement for the physical task rewards.
+type HomeostasisConfig struct {
+	Enabled                       bool
+	InitialEnergy                 float64
+	EnergyDecayPerStep            float64
+	SecureGripEnergyGain          float64
+	LiftEnergyGain                float64
+	DeliveryEnergyGain            float64
+	SuccessfulPlacementEnergyGain float64
+	UnsafeDropEnergyLoss          float64
+	BreakEnergyLoss               float64
+}
+
+// CurriculumStage selects a physically real, progressively harder task
+// distribution. It never injects actions or supplies a hidden controller.
+type CurriculumStage string
+
+const (
+	CurriculumLowerAndContact     CurriculumStage = "lower-and-contact"
+	CurriculumGraspAndLift        CurriculumStage = "grasp-and-lift"
+	CurriculumTransportAndRelease CurriculumStage = "transport-and-release"
+	CurriculumFullPickAndPlace    CurriculumStage = "full-pick-and-place"
+)
+
+func (stage CurriculumStage) Valid() bool {
+	switch stage {
+	case CurriculumLowerAndContact, CurriculumGraspAndLift, CurriculumTransportAndRelease, CurriculumFullPickAndPlace:
+		return true
+	default:
+		return false
+	}
+}
+
+// CurriculumConfig contains only task-distribution and verification settings.
+type CurriculumConfig struct {
+	Stage              CurriculumStage
+	ContactStableSteps int
+	// EpisodeStepLimit applies only to a non-full curriculum stage when
+	// positive. Shorter stages must reset frequently enough to sample their
+	// narrow initial distribution instead of spending a full task horizon away
+	// from the learning objective.
+	EpisodeStepLimit int
+}
+
 // RewardConfig contains the reward-shaping constants for one episode.
 type RewardConfig struct {
 	TimePenalty                  float64
@@ -22,6 +67,8 @@ type RewardConfig struct {
 	ExcessGripForcePenaltyScale  float64
 	AttachedForceStabilityReward float64
 	InvalidGripPenalty           float64
+	EmptyGripStepPenalty         float64
+	InactivityPenalty            float64
 	EmptyTargetPenalty           float64
 	DroppedObjectPenalty         float64
 	BoundaryCollisionPenalty     float64
@@ -102,6 +149,8 @@ type Config struct {
 	// an explicit baseline experiment. Learned controllers keep this false.
 	ExposeRequiredGripForceBaseline bool
 	MaxEpisodeSteps                 int
+	Homeostasis                     HomeostasisConfig
+	Curriculum                      CurriculumConfig
 	Reward                          RewardConfig
 	Terrain                         []TerrainPoint
 }
@@ -138,7 +187,7 @@ func DefaultConfig() Config {
 		InitialGripperY:           2.8,
 		TargetX:                   4.5,
 		TargetWidth:               0.8,
-		MaxEpisodeSteps:           300,
+		MaxEpisodeSteps:           500,
 		HorizontalTolerance:       0.15,
 		VerticalTolerance:         0.10,
 		GraspHorizontalTolerance:  0.15,
@@ -148,7 +197,27 @@ func DefaultConfig() Config {
 		StablePlacementSteps:      3,
 		LiftClearance:             0.60,
 		ReleaseTolerance:          0.08,
-		ActionDeadZone:            0.03,
+		// A normalized SAC action of 0.03 was large enough to erase legitimate
+		// early descent commands (for example -0.004). Hardware still clamps all
+		// commands; this intentionally small, configurable dead zone only removes
+		// numerical noise rather than exploration.
+		ActionDeadZone: 0.001,
+		Homeostasis: HomeostasisConfig{
+			Enabled:                       true,
+			InitialEnergy:                 0.60,
+			EnergyDecayPerStep:            0.001,
+			SecureGripEnergyGain:          0.06,
+			LiftEnergyGain:                0.08,
+			DeliveryEnergyGain:            0.10,
+			SuccessfulPlacementEnergyGain: 0.30,
+			UnsafeDropEnergyLoss:          0.10,
+			BreakEnergyLoss:               0.20,
+		},
+		Curriculum: CurriculumConfig{
+			Stage:              CurriculumFullPickAndPlace,
+			ContactStableSteps: 3,
+			EpisodeStepLimit:   96,
+		},
 		Reward: RewardConfig{
 			TimePenalty:                  -0.001,
 			ApproachProgressScale:        1.0,
@@ -168,10 +237,15 @@ func DefaultConfig() Config {
 			ExcessGripForcePenaltyScale:  0.05,
 			AttachedForceStabilityReward: 0.02,
 			InvalidGripPenalty:           -1.0,
+			EmptyGripStepPenalty:         -0.01,
+			InactivityPenalty:            -0.005,
 			EmptyTargetPenalty:           -2.0,
 			DroppedObjectPenalty:         -10.0,
 			BoundaryCollisionPenalty:     -0.25,
-			LowerProgressScale:           1.0,
+			// Descending toward the physical grasp guide needs a denser signal
+			// than a distant terminal placement reward. This is still signed
+			// progress, so upward/away motion is penalized symmetrically.
+			LowerProgressScale:           3.0,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},
 	}

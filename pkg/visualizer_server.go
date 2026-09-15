@@ -246,8 +246,10 @@ func (s *APIServer) telemetry() map[string]any {
 		objectReleased := selected.Info["object_released"] > 0
 		objectBroken := selected.Info["object_broken"] > 0
 		status := objectStatus(phase, gripperClosed, contactDetected, objectAttached, objectReleased, objectBroken)
+		energyEvent := energyEventLabel(selected.Info["energy_event_code"])
 		worker = map[string]any{
 			"id": selected.ID, "episode_id": selected.EpisodeID, "episode_step": selected.EpisodeStep, "episode_policy_version": selected.PolicyVersion,
+			"action_source": selected.ActionSource, "curriculum_stage": string(config.Curriculum.Stage),
 			"task_phase": phase.String(), "gripper_state": ternary(gripperClosed, "closed", "open"), "contact_state": ternary(contactDetected, "contact", "none"),
 			"force_valid":     selected.Info["force_valid"] > 0,
 			"gantry":          map[string]any{"carriage_x": carriageX, "gripper_y": gripperY, "grip_force": gripForce, "jaw_opening": 1 - (get(14)+1)/2, "rail_y": config.RailY},
@@ -256,15 +258,35 @@ func (s *APIServer) telemetry() map[string]any {
 			"workspace":       map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "safeMinX": safeBounds.MinX, "safeMaxX": safeBounds.MaxX, "safeMinY": safeBounds.MinY, "safeMaxY": safeBounds.MaxY, "boundaryHit": boundaryHit, "coordinate_system_version": forcecontrol.CoordinateSystemVersion},
 			"workspace_min_x": config.Workspace.MinX, "workspace_max_x": config.Workspace.MaxX, "workspace_min_y": config.Workspace.MinY, "workspace_max_y": config.Workspace.MaxY,
 			"terrain":                map[string]any{"points": s.sceneConfig()["terrain"].(map[string]any)["points"]},
-			"last_action":            map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "filtered_horizontal": selected.Info["filtered_action_horizontal"], "filtered_vertical": selected.Info["filtered_action_vertical"], "filtered_gripper": filteredForceRateCommand, "force_rate_command": forceRateCommand, "force_rate_newtons_per_second": float64(filteredForceRateCommand) * config.MaxGripForceRate, "force_action_mode": forceActionMode, "normalized_grip_force": lastAction[2]},
-			"control":                map[string]any{"dt": selected.Info["control_timestep"], "carriage_x": selected.Info["carriage_x"], "gripper_y": selected.Info["gripper_y"], "velocity_x": selected.Info["carriage_velocity_x"], "velocity_y": selected.Info["gripper_velocity_y"], "error_x": selected.Info["gripper_to_object_error_x"], "error_y": selected.Info["gripper_to_object_error_y"], "vertical_acceleration": selected.Info["vertical_acceleration"], "invalid_contact_frames": selected.Info["invalid_contact_frames"], "slip_severity": selected.Info["slip_severity"], "slip_frames": selected.Info["slip_frames"]},
+			"last_action":            map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "filtered_horizontal": selected.Info["filtered_action_horizontal"], "filtered_vertical": selected.Info["filtered_action_vertical"], "filtered_gripper": filteredForceRateCommand, "dead_zone_removed_horizontal": selected.Info["dead_zone_removed_horizontal"] > 0, "dead_zone_removed_vertical": selected.Info["dead_zone_removed_vertical"] > 0, "dead_zone_removed_gripper": selected.Info["dead_zone_removed_gripper"] > 0, "force_rate_command": forceRateCommand, "force_rate_newtons_per_second": float64(filteredForceRateCommand) * config.MaxGripForceRate, "force_action_mode": forceActionMode, "normalized_grip_force": lastAction[2]},
+			"control":                map[string]any{"dt": selected.Info["control_timestep"], "phase_numeric": selected.Info["phase_numeric"], "raw_horizontal_action": selected.Info["raw_action_horizontal"], "raw_vertical_action": selected.Info["raw_action_vertical"], "raw_gripper_action": selected.Info["raw_action_gripper"], "filtered_horizontal_action": selected.Info["filtered_action_horizontal"], "filtered_vertical_action": selected.Info["filtered_action_vertical"], "filtered_gripper_action": selected.Info["filtered_action_gripper"], "carriage_x": selected.Info["carriage_x"], "gripper_y": selected.Info["gripper_y"], "velocity_x": selected.Info["carriage_velocity_x"], "velocity_y": selected.Info["gripper_velocity_y"], "error_x": selected.Info["gripper_to_object_error_x"], "error_y": selected.Info["gripper_to_object_error_y"], "vertical_acceleration": selected.Info["vertical_acceleration"], "boundary_hit": selected.Info["boundary_hit"] > 0, "invalid_contact_frames": selected.Info["invalid_contact_frames"], "slip_severity": selected.Info["slip_severity"], "slip_frames": selected.Info["slip_frames"]},
 			"latest_vertical_action": lastAction[1], "velocity_y": denormalize(get(3), -config.MaxVerticalSpeed, config.MaxVerticalSpeed), "target_grasp_y": targetGraspY, "vertical_error": targetGraspY - gripperY,
 			"last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": selected.Info["gripper_to_object_distance"], "distance_to_target": selected.Info["object_to_target_distance"],
 			"contact_detected": contactDetected, "object_attached": objectAttached, "object_stable": selected.Info["object_stable"] > 0, "slipping": selected.Info["slipping"] > 0,
+			"homeostasis":     map[string]any{"energy": selected.Info["energy"], "delta": selected.Info["energy_delta"], "decay": selected.Info["energy_decay"], "food_gain": selected.Info["energy_food_gain"], "reward": selected.Info["homeostasis_reward"], "event": energyEvent},
 			"approach_reward": selected.Info["approach_reward"], "grip_reward": selected.Info["grip_reward"], "delivery_reward": selected.Info["delivery_reward"], "success_reward": selected.Info["success_reward"], "penalty_reward": selected.Info["penalty_reward"], "total_step_reward": selected.Info["total_step_reward"], "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome,
 		}
 	}
-	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": snapshot.StepsPerSecond, "episodes_per_second": snapshot.EpisodesPerSecond, "total_steps": snapshot.TotalSteps, "success_rate": snapshot.SuccessRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy, "last_error": snapshot.LastError}, "worker": worker}
+	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": snapshot.StepsPerSecond, "episodes_per_second": snapshot.EpisodesPerSecond, "total_steps": snapshot.TotalSteps, "total_episodes": snapshot.TotalEpisodes, "success_rate": snapshot.SuccessRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy, "critic_one_q": snapshot.CriticOneQ, "critic_two_q": snapshot.CriticTwoQ, "alpha": snapshot.Alpha, "actor_log_std": []float32{snapshot.ActorLogStdHorizontal, snapshot.ActorLogStdVertical, snapshot.ActorLogStdGripper}, "action_statistics": snapshot.ActionStatistics, "phase_occupancy": snapshot.PhaseOccupancy, "failure_reasons": snapshot.FailureReasons, "last_error": snapshot.LastError}, "worker": worker}
+}
+
+func energyEventLabel(code float32) string {
+	switch int(code) {
+	case 1:
+		return "Secure grasp: energy restored"
+	case 2:
+		return "Lift milestone: energy restored"
+	case 3:
+		return "Target reached: energy restored"
+	case 4:
+		return "Successful placement: full meal"
+	case 5:
+		return "Unsafe drop: energy lost"
+	case 6:
+		return "Object break: energy lost"
+	default:
+		return ""
+	}
 }
 
 func objectStatus(phase forcecontrol.Phase, gripperClosed, contactDetected, attached, released, broken bool) string {

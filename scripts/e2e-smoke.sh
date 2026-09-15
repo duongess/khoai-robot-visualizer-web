@@ -8,7 +8,7 @@ LEARNER_LOG="$(mktemp /tmp/swarmdex-learner.XXXXXX)"
 VISUALIZER_LOG="$(mktemp /tmp/swarmdex-visualizer.XXXXXX)"
 
 cleanup() {
-  kill "${VISUALIZER_PID:-}" "${LEARNER_PID:-}" 2>/dev/null || true
+  kill -- "-${VISUALIZER_PID:-}" "-${LEARNER_PID:-}" 2>/dev/null || true
   wait "${VISUALIZER_PID:-}" 2>/dev/null || true
   wait "${LEARNER_PID:-}" 2>/dev/null || true
 }
@@ -25,9 +25,9 @@ wait_for_url() {
 
 cd "$ROOT_DIR"
 make build
-(cd "$FRAMEWORK_DIR" && poetry run python -m ai >"$LEARNER_LOG" 2>&1) &
+setsid bash -c "cd \"$FRAMEWORK_DIR\" && exec poetry run python -m ai" >"$LEARNER_LOG" 2>&1 &
 LEARNER_PID=$!
-FORCE_CONTROL_ADDR="$ADDRESS" ./bin/force-control-demo >"$VISUALIZER_LOG" 2>&1 &
+setsid bash -c "cd \"$ROOT_DIR\" && FORCE_CONTROL_ADDR=\"$ADDRESS\" exec ./bin/force-control-demo" >"$VISUALIZER_LOG" 2>&1 &
 VISUALIZER_PID=$!
 
 if ! wait_for_url "http://$ADDRESS/api/health"; then

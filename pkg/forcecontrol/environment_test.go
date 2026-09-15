@@ -32,6 +32,87 @@ func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
 	}
 }
 
+func TestHomeostasisEnergyDecaysOnceResetsAndStaysObservable(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.InitialEnergy = 0.60
+	config.Homeostasis.EnergyDecayPerStep = 0.01
+	task := NewTask(42, config)
+	observation, err := task.Reset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.Energy != 0.60 || observation[observationEnergy] != float32(normalize01(0.60)) {
+		t.Fatalf("reset energy was not authoritative/observable: state=%v observation=%v", task.environment.state.Energy, observation[observationEnergy])
+	}
+	result, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := task.environment.state.Energy, 0.59; math.Abs(got-want) > 1e-9 || math.Abs(float64(result.Info["energy_delta"])+0.01) > 1e-6 || math.Abs(float64(result.Info["energy_decay"])+0.01) > 1e-6 || result.Info["energy_food_gain"] != 0 || math.Abs(float64(result.Info["homeostasis_reward"])+0.01) > 1e-6 {
+		t.Fatalf("energy did not decay exactly once: state=%v info=%#v", got, result.Info)
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.Energy != config.Homeostasis.InitialEnergy || task.environment.gripFoodAwarded || task.environment.liftFoodAwarded || task.environment.deliveryFoodAwarded || task.environment.successFoodAwarded {
+		t.Fatalf("reset did not clear homeostasis state: %#v", task.environment)
+	}
+}
+
+func TestHomeostasisMilestonesAreVerifiedOneTimeAndClamped(t *testing.T) {
+	task := attachedTask(t, DefaultConfig())
+	if !task.environment.gripFoodAwarded {
+		t.Fatal("physical secure grasp did not restore energy")
+	}
+	energyAfterGrip := task.environment.state.Energy
+	stillAttached, err := task.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillAttached.Info["energy_food_gain"] != 0 || task.environment.state.Energy >= energyAfterGrip {
+		t.Fatalf("secure grasp food was farmed: %#v", stillAttached.Info)
+	}
+
+	task.environment.state.Phase = PhaseLiftObject
+	for step := 0; step < 30 && !task.environment.liftFoodAwarded; step++ {
+		if _, err := task.Step(framework.Action{0, 1, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !task.environment.liftFoodAwarded {
+		t.Fatal("verified lift did not restore energy")
+	}
+	task.environment.state.Phase = PhaseMoveToTarget
+	for step := 0; step < 40 && !task.environment.deliveryFoodAwarded; step++ {
+		if _, err := task.Step(framework.Action{1, 0, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !task.environment.deliveryFoodAwarded {
+		t.Fatal("verified attached delivery did not restore energy")
+	}
+
+	// Clamp at the upper and lower physical energy limits, even when a test
+	// supplies an otherwise valid milestone/failure state.
+	task.environment.state.Energy = 0.99
+	task.environment.gripFoodAwarded = false
+	task.environment.deliveryFoodAwarded = true
+	task.environment.liftFoodAwarded = true
+	task.environment.state.Grip.ObjectAttached = true
+	task.environment.state.Grip.Slipping = false
+	task.environment.state.ObjectX = task.environment.state.CarriageX
+	task.environment.state.ObjectY = task.environment.state.GripperY - task.config.ObjectHeight/2
+	task.environment.updateHomeostasis("")
+	if task.environment.state.Energy != 1 {
+		t.Fatalf("energy upper clamp failed: %v", task.environment.state.Energy)
+	}
+	task.environment.state.Energy = 0.05
+	task.environment.updateHomeostasis("object_break")
+	if task.environment.state.Energy != 0 {
+		t.Fatalf("energy lower clamp failed: %v", task.environment.state.Energy)
+	}
+}
+
 func TestKnownActionsMoveGripperAndAreClamped(t *testing.T) {
 	task := NewTask(1, DefaultConfig())
 	initial, err := task.Reset()
@@ -99,12 +180,16 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 
 	broken := attachedTask(t, config)
 	broken.environment.state.GripForce = broken.environment.state.ObjectBreakForce
+	previousEnergy := broken.environment.state.Energy
 	result, err := broken.Step(framework.Action{0, 0, 0})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !result.Done || result.Outcome != OutcomeFailure {
 		t.Fatalf("break result=%#v error=%v", result, err)
+	}
+	if got, want := broken.environment.state.Energy, previousEnergy-config.Homeostasis.EnergyDecayPerStep-config.Homeostasis.BreakEnergyLoss; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != float32(energyEventBreak) {
+		t.Fatalf("break energy loss mismatch: got=%v want=%v info=%#v", got, want, result.Info)
 	}
 }
 
@@ -186,6 +271,83 @@ func TestVerticalDirectionAndPhysicalWorkspaceClipping(t *testing.T) {
 	bounds := SafeGripperBounds(config, task.environment.state.CarriageX)
 	if task.environment.state.GripperY != bounds.MinY || task.environment.state.GripperVelocityY != 0 || !task.environment.state.BoundaryHit {
 		t.Fatalf("negative Y escaped lower bound: state=%#v bounds=%#v", task.environment.state, bounds)
+	}
+}
+
+func TestFirstNegativeVerticalActionDescendsInWorldCoordinates(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	initialY := task.environment.state.GripperY
+	result, err := task.Step(framework.Action{0, -1, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := task.environment.state.GripperVelocityY, -0.3; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("first negative vertical velocity = %v, want %v", got, want)
+	}
+	if got, want := task.environment.state.GripperY, initialY-0.03; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("first negative vertical position = %v, want %v", got, want)
+	}
+	if result.Info["raw_action_vertical"] != -1 || math.Abs(float64(result.Info["filtered_action_vertical"])-(-0.3)) > 1e-6 || result.Info["phase_numeric"] != float32(PhaseLowerToObject) {
+		t.Fatalf("vertical action or phase telemetry is incorrect: %#v", result.Info)
+	}
+	for step := 0; step < 20; step++ {
+		if _, err := task.Step(framework.Action{0, 0, -1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if math.Abs(task.environment.state.GripperVelocityY) > 1e-6 {
+		t.Fatalf("zero vertical actions did not settle velocity: %v", task.environment.state.GripperVelocityY)
+	}
+}
+
+func TestVerticalSignReversalDoesNotKeepAStaleUpwardCommand(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Step(framework.Action{0, 1, -1}); err != nil {
+		t.Fatal(err)
+	}
+	before := task.environment.state.GripperY
+	reversed, err := task.Step(framework.Action{0, -1, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reversed.Info["filtered_action_vertical"] >= 0 || task.environment.state.GripperVelocityY > 0 || task.environment.state.GripperY > before {
+		t.Fatalf("negative vertical reversal retained upward motion: state=%#v info=%#v", task.environment.state, reversed.Info)
+	}
+}
+
+func TestIdleLoweringAndEmptyClosedGripperReceiveStepPenalties(t *testing.T) {
+	idle := NewTask(1, DefaultConfig())
+	if _, err := idle.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	idle.environment.state.Phase = PhaseLowerToObject
+	still, err := idle.Step(framework.Action{0, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if still.Info["penalty_reward"] >= float32(idle.config.Reward.TimePenalty) {
+		t.Fatalf("idle lowering was not penalized: %#v", still.Info)
+	}
+
+	empty := NewTask(1, DefaultConfig())
+	if _, err := empty.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := empty.Step(framework.Action{0, 0, 0.5}); err != nil {
+		t.Fatal(err)
+	}
+	continued, err := empty.Step(framework.Action{0, 0, 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continued.Info["penalty_reward"] >= float32(empty.config.Reward.TimePenalty+empty.config.Reward.EmptyGripStepPenalty) {
+		t.Fatalf("continued empty closed grip was not penalized: %#v", continued.Info)
 	}
 }
 
@@ -273,6 +435,9 @@ func TestScriptedPickAndPlaceSucceeds(t *testing.T) {
 	if !result.Done || result.Outcome != OutcomeSuccess || task.environment.state.Phase != PhaseSuccess {
 		t.Fatalf("scripted episode did not succeed: result=%#v environment=%s", result, task.environment)
 	}
+	if !task.environment.gripFoodAwarded || !task.environment.liftFoodAwarded || !task.environment.deliveryFoodAwarded || !task.environment.successFoodAwarded || result.Info["energy_event_code"] != float32(energyEventSuccess) || result.Info["energy_food_gain"] <= 0 {
+		t.Fatalf("verified completion did not award each homeostasis milestone once: flags=%t/%t/%t/%t info=%#v", task.environment.gripFoodAwarded, task.environment.liftFoodAwarded, task.environment.deliveryFoodAwarded, task.environment.successFoodAwarded, result.Info)
+	}
 }
 
 func TestReleasedObjectMustStabilizeBeforeSuccess(t *testing.T) {
@@ -311,7 +476,7 @@ func TestEmptyGripperAtTargetCannotAttachEarnDeliveryOrSucceed(t *testing.T) {
 	if grip.ContactDetected || grip.ObjectAttached || task.environment.state.ObjectGrasped {
 		t.Fatalf("empty target close created a grasp: %#v", grip)
 	}
-	if result.Info["delivery_reward"] != 0 || result.Info["grip_reward"] != 0 || result.Outcome == OutcomeSuccess {
+	if result.Info["delivery_reward"] != 0 || result.Info["grip_reward"] != 0 || result.Info["energy_food_gain"] != 0 || result.Outcome == OutcomeSuccess {
 		t.Fatalf("empty gripper earned target reward or success: %#v", result)
 	}
 	if result.Info["penalty_reward"] >= float32(config.Reward.TimePenalty) {
@@ -509,6 +674,7 @@ func forceStepsToAttach(t *testing.T, task *Task) int {
 
 func TestMotionFilteringDeadZoneAndAccelerationBounds(t *testing.T) {
 	config := DefaultConfig()
+	config.ActionDeadZone = 0.03 // verify configurability independently of the lower default.
 	config.InitialCarriageX = 3
 	config.InitialGripperY = 2
 	task := NewTask(1, config)
@@ -548,6 +714,74 @@ func TestMotionFilteringDeadZoneAndAccelerationBounds(t *testing.T) {
 	}
 	if got := reverse.Info["control_timestep"]; math.Abs(float64(got)-config.TimeStep) > 1e-6 {
 		t.Fatalf("telemetry timestep=%v, want fixed %v", got, config.TimeStep)
+	}
+}
+
+func TestDeadZoneReportsSuppressedCommandsAndKeepsCommandsAboveThreshold(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX, config.InitialGripperY = 3, 2
+	config.ActionDeadZone = 0.005
+	config.ActionSmoothingAlpha = 1
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	below, err := task.Step(framework.Action{0, -0.004, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if below.Info["filtered_action_vertical"] != 0 || below.Info["dead_zone_removed_vertical"] != 1 || task.environment.state.GripperVelocityY != 0 {
+		t.Fatalf("below-dead-zone command was not explicitly removed: %#v", below.Info)
+	}
+	above, err := task.Step(framework.Action{0, -0.006, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if above.Info["filtered_action_vertical"] >= 0 || above.Info["dead_zone_removed_vertical"] != 0 || task.environment.state.GripperY >= config.InitialGripperY {
+		t.Fatalf("above-dead-zone descent did not reach physics: state=%#v info=%#v", task.environment.state, above.Info)
+	}
+}
+
+func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
+	lowerConfig := DefaultConfig()
+	lowerConfig.Curriculum.Stage = CurriculumLowerAndContact
+	lowerConfig.Curriculum.ContactStableSteps = 1
+	lower := NewTask(1, lowerConfig)
+	if _, err := lower.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if lower.environment.state.Phase != PhaseLowerToObject || lower.environment.state.CarriageX != lower.environment.state.ObjectX {
+		t.Fatalf("lower curriculum did not initialize above object: %#v", lower.environment.state)
+	}
+	// The policy, rather than the curriculum, must command the remaining
+	// physical descent before valid stable contact can finish the stage.
+	for step := 0; step < 20 && lower.environment.state.Phase != PhaseSuccess; step++ {
+		if _, err := lower.Step(framework.Action{0, -1, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lower.environment.state.Phase != PhaseSuccess {
+		t.Fatalf("lower curriculum did not accept stable physical contact: %#v", lower.environment.state)
+	}
+
+	liftConfig := DefaultConfig()
+	liftConfig.Curriculum.Stage = CurriculumGraspAndLift
+	lift := NewTask(1, liftConfig)
+	if _, err := lift.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if lift.environment.state.Phase != PhaseGripObject || lift.environment.state.Grip.ObjectAttached {
+		t.Fatalf("grasp curriculum must still require a learned attachment: %#v", lift.environment.state)
+	}
+
+	transportConfig := DefaultConfig()
+	transportConfig.Curriculum.Stage = CurriculumTransportAndRelease
+	transport := NewTask(1, transportConfig)
+	if _, err := transport.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if transport.environment.state.Phase != PhaseMoveToTarget || !transport.environment.state.Grip.ObjectAttached || !transport.environment.state.Grip.ForceValid {
+		t.Fatalf("transport curriculum did not initialize a physical carried object: %#v", transport.environment.state)
 	}
 }
 
@@ -608,12 +842,16 @@ func TestDeliveryRewardRequiresAttachedObject(t *testing.T) {
 func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
 	task := attachedTask(t, DefaultConfig())
 	task.environment.state.Phase = PhaseMoveToTarget
+	previousEnergy := task.environment.state.Energy
 	result, err := task.Step(framework.Action{0, 0, -1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !result.Done || result.Outcome != OutcomeFailure || result.Reward > float32(task.config.Reward.DroppedObjectPenalty) {
 		t.Fatalf("transport drop was not penalized: %#v", result)
+	}
+	if got, want := task.environment.state.Energy, previousEnergy-task.config.Homeostasis.EnergyDecayPerStep-task.config.Homeostasis.UnsafeDropEnergyLoss; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != float32(energyEventUnsafeDrop) {
+		t.Fatalf("unsafe drop energy loss mismatch: got=%v want=%v info=%#v", got, want, result.Info)
 	}
 }
 

@@ -56,6 +56,13 @@ export const PhysicsMetrics: React.FC = () => {
 	const objectAttached = worker?.object_attached ?? false;
 	const contactDetected = worker?.contact_detected ?? false;
   const taskPhase: TaskPhase = worker?.task_phase ?? 'idle';
+	const rawVerticalAction = worker?.control?.raw_vertical_action ?? 0;
+	const filteredVerticalAction = worker?.control?.filtered_vertical_action ?? 0;
+	const verticalVelocity = worker?.control?.velocity_y ?? 0;
+  const boundaryHit = worker?.control?.boundary_hit ?? false;
+	const homeostasis = worker?.homeostasis;
+	const energy = homeostasis?.energy ?? 0;
+	const energyPercent = Math.min(100, Math.max(0, energy * 100));
   const phaseInfo = TASK_PHASE_LABELS[taskPhase] || { step: 0, label: taskPhase, desc: '' };
 
   // Runtime Metrics
@@ -63,7 +70,11 @@ export const PhysicsMetrics: React.FC = () => {
   const successRate = runtime?.success_rate ?? 0;
   const policyVersion = runtime?.policy_version ?? 0;
   const stepsPerSec = runtime?.steps_per_second ?? 0;
-  const runtimeError = runtime?.last_error;
+	const runtimeError = runtime?.last_error;
+	const actionStatistics = runtime?.action_statistics;
+	const verticalDeadZonePercent = (actionStatistics?.dead_zone_removed_fraction?.[1] ?? 0) * 100;
+	const curriculumStage = worker?.curriculum_stage ?? 'full-pick-and-place';
+	const actionSource = worker?.action_source ?? 'pending';
 
   // Safety state evaluation according to Section 5 rules
   let forceState: 'stable' | 'slipping' | 'break_risk' = 'stable';
@@ -118,6 +129,7 @@ export const PhysicsMetrics: React.FC = () => {
             <span className="font-mono font-semibold text-cyan-300">{phaseInfo.label}</span>
           </div>
           <p className="text-[10px] text-slate-400 leading-tight font-mono">{phaseInfo.desc}</p>
+		  <p className="text-[9px] text-violet-300 font-mono">curriculum: {curriculumStage} · action source: {actionSource}</p>
         </div>
 
         {/* Object & Gantry State Grid */}
@@ -161,6 +173,23 @@ export const PhysicsMetrics: React.FC = () => {
             <div className="text-[10px] text-slate-400">Gripper Height Y</div>
             <div className="font-bold text-slate-200 mt-0.5">{gripperY.toFixed(2)} m</div>
           </div>
+
+		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
+			<div className="flex justify-between text-[10px] text-slate-400">
+			  <span>Energy Reserve</span><span className="font-mono text-emerald-300">{energyPercent.toFixed(0)}%</span>
+			</div>
+			<div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-800">
+			  <div className="h-full bg-emerald-400 transition-all duration-150" style={{ width: `${energyPercent}%` }} />
+			</div>
+			{homeostasis?.event && <div className="mt-1 text-[9px] text-emerald-300">{homeostasis.event}</div>}
+		  </div>
+
+		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
+			<div className="text-[10px] text-slate-400">Vertical Control (world +Y up)</div>
+			<div className="font-mono text-[10px] text-slate-200 mt-0.5">
+			  raw {rawVerticalAction.toFixed(3)} · filtered {filteredVerticalAction.toFixed(3)} · velocity {verticalVelocity.toFixed(3)} m/s · dead-zone {verticalDeadZonePercent.toFixed(1)}% · step {worker?.episode_step ?? 0}{boundaryHit ? ' · BOUNDARY' : ''}
+			</div>
+		  </div>
         </div>
 
         {runtimeError && (

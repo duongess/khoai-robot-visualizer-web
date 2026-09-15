@@ -8,11 +8,11 @@ import (
 )
 
 // ObservationDimension is the fixed goal-conditioned policy input size.
-const ObservationDimension = 22
+const ObservationDimension = 23
 
 // CoordinateSystemVersion changes whenever action meaning or observation
 // normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 9
+const CoordinateSystemVersion = 10
 
 const (
 	observationGripperX = iota
@@ -37,6 +37,7 @@ const (
 	observationPhase
 	observationContactDetected
 	observationRequiredGripForceBaseline
+	observationEnergy
 )
 
 // GripState distinguishes a command to close the gripper from physical object
@@ -52,13 +53,14 @@ type GripState struct {
 // RewardBreakdown keeps every reward term observable so training behaviour can
 // be diagnosed without reverse engineering a scalar reward from telemetry.
 type RewardBreakdown struct {
-	Approach float64
-	Grip     float64
-	Lift     float64
-	Delivery float64
-	Success  float64
-	Penalty  float64
-	Total    float64
+	Approach    float64
+	Grip        float64
+	Lift        float64
+	Delivery    float64
+	Success     float64
+	Homeostasis float64
+	Penalty     float64
+	Total       float64
 }
 
 // Phase describes progress through one policy-controlled pick-and-place episode.
@@ -136,6 +138,8 @@ type State struct {
 	Grip                 GripState
 	Phase                Phase
 	EpisodeStep          int
+	// Energy is an authoritative, normalized homeostatic reserve in [0, 1].
+	Energy float64
 }
 
 // Environment owns all mutable state for one independent task instance.
@@ -147,6 +151,10 @@ type Environment struct {
 	ready  bool
 
 	gripBonusAwarded               bool
+	gripFoodAwarded                bool
+	liftFoodAwarded                bool
+	deliveryFoodAwarded            bool
+	successFoodAwarded             bool
 	wasEverGrasped                 bool
 	invalidGripPenaltyAwarded      bool
 	insufficientGripPenaltyAwarded bool
@@ -155,13 +163,34 @@ type Environment struct {
 	failureReason                  string
 	lastReward                     RewardBreakdown
 	lastGripRateAction             float64
+	deadZoneRemoved                [3]bool
+	filterDeadZoneRemoved          [3]bool
 	filteredAction                 [3]float64
 	verticalAcceleration           float64
 	invalidContactFrames           int
 	slipFrames                     int
 	releaseCommanded               bool
 	contactBeforeMotion            bool
+	lastEnergyDelta                float64
+	lastEnergyDecay                float64
+	lastEnergyFoodGain             float64
+	lastEnergyEvent                energyEvent
+	contactStableFrames            int
 }
+
+// energyEvent is compactly encoded for StepResult.Info while the visualizer
+// turns it into a human-readable label.
+type energyEvent uint8
+
+const (
+	energyEventNone energyEvent = iota
+	energyEventSecureGrasp
+	energyEventLift
+	energyEventDelivery
+	energyEventSuccess
+	energyEventUnsafeDrop
+	energyEventBreak
+)
 
 func newEnvironment(seed int64, config Config) *Environment {
 	return &Environment{config: config, seed: seed, random: rand.New(rand.NewSource(seed))}
@@ -182,8 +211,13 @@ func (e *Environment) reset() State {
 		TargetX:          e.config.TargetX,
 		TargetY:          e.terrainHeight(e.config.TargetX),
 		Phase:            PhaseApproachObject,
+		Energy:           clamp(e.config.Homeostasis.InitialEnergy, 0, 1),
 	}
 	e.gripBonusAwarded = false
+	e.gripFoodAwarded = false
+	e.liftFoodAwarded = false
+	e.deliveryFoodAwarded = false
+	e.successFoodAwarded = false
 	e.wasEverGrasped = false
 	e.invalidGripPenaltyAwarded = false
 	e.insufficientGripPenaltyAwarded = false
@@ -192,14 +226,54 @@ func (e *Environment) reset() State {
 	e.failureReason = ""
 	e.lastReward = RewardBreakdown{}
 	e.lastGripRateAction = 0
+	e.deadZoneRemoved = [3]bool{}
+	e.filterDeadZoneRemoved = [3]bool{}
 	e.filteredAction = [3]float64{}
 	e.verticalAcceleration = 0
 	e.invalidContactFrames = 0
 	e.slipFrames = 0
 	e.releaseCommanded = false
 	e.contactBeforeMotion = false
+	e.lastEnergyDelta = 0
+	e.lastEnergyDecay = 0
+	e.lastEnergyFoodGain = 0
+	e.lastEnergyEvent = energyEventNone
+	e.contactStableFrames = 0
+	e.applyCurriculumReset()
 	e.ready = true
 	return e.state
+}
+
+// applyCurriculumReset changes only the initial physical state and stage
+// criterion. The actor still issues every horizontal, vertical, and grip-rate
+// command; no curriculum branch moves or grips the robot automatically.
+func (e *Environment) applyCurriculumReset() {
+	switch e.config.Curriculum.Stage {
+	case CurriculumLowerAndContact:
+		e.state.CarriageX = e.state.ObjectX
+		_, _, minimumY, maximumY := e.safeBounds()
+		e.state.GripperY = clamp(e.objectGripHeight()+2*e.config.VerticalTolerance, minimumY, maximumY)
+		e.state.Phase = PhaseLowerToObject
+	case CurriculumGraspAndLift:
+		e.state.CarriageX = e.state.ObjectX
+		e.state.GripperY = e.objectGripHeight()
+		e.state.Phase = PhaseGripObject
+	case CurriculumTransportAndRelease:
+		e.state.CarriageX = e.state.ObjectX
+		carryObjectY := e.requiredCarryHeight()
+		e.state.GripperY = clamp(carryObjectY+e.config.ObjectHeight/2, SafeGripperBounds(e.config, e.state.CarriageX).MinY, SafeGripperBounds(e.config, e.state.CarriageX).MaxY)
+		e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
+		e.state.ObjectX = e.state.CarriageX
+		e.state.GripperOpening = 0
+		e.state.GripForce = math.Min(e.state.ObjectBreakForce-e.config.ReleaseTolerance, e.requiredForce()+e.config.ReleaseTolerance)
+		e.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+		e.state.ObjectGrasped = true
+		e.state.Phase = PhaseMoveToTarget
+		e.wasEverGrasped = true
+		// These milestones occurred before the curriculum episode began and must
+		// not turn into a repeatable reset reward.
+		e.gripFoodAwarded, e.liftFoodAwarded = true, true
+	}
 }
 
 func (e *Environment) step(action []float32) (State, float64, Outcome, bool, error) {
@@ -242,19 +316,22 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.state.EpisodeStep++
 	if err := e.ValidateState(); err != nil {
 		e.failureReason, e.state.Phase = "invalid_state", PhaseFailure
-		e.lastReward = RewardBreakdown{Penalty: e.config.Reward.WorkspacePenalty, Total: e.config.Reward.WorkspacePenalty}
+		e.updateHomeostasis("workspace_violation")
+		e.lastReward = RewardBreakdown{Homeostasis: e.lastEnergyDelta, Penalty: e.config.Reward.WorkspacePenalty, Total: e.lastEnergyDelta + e.config.Reward.WorkspacePenalty}
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
 	}
 
 	terminalReason := e.detectFailure(previous)
 	if terminalReason != "" {
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
+		e.updateHomeostasis(terminalReason)
 		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
 		e.lastReward.Total += e.failurePenalty(terminalReason)
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
 	}
 	e.updatePhase(previous)
+	e.updateHomeostasis("")
 	if e.state.Phase == PhaseSuccess {
 		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 		if !e.successRewardAwarded {
@@ -273,12 +350,15 @@ func (e *Environment) validatedAction(action []float32) ([3]float64, error) {
 		return [3]float64{}, errors.New("force-control action must contain exactly three values")
 	}
 	values := [3]float64{}
+	e.deadZoneRemoved = [3]bool{}
+	e.filterDeadZoneRemoved = [3]bool{}
 	for index, value := range action {
 		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			return [3]float64{}, errors.New("force-control action must contain only finite values")
 		}
 		values[index] = clamp(float64(value), -1, 1)
-		if math.Abs(values[index]) < e.config.ActionDeadZone {
+		if values[index] != 0 && math.Abs(values[index]) < e.config.ActionDeadZone {
+			e.deadZoneRemoved[index] = true
 			values[index] = 0
 		}
 	}
@@ -302,8 +382,20 @@ func (e *Environment) filterAction(raw [3]float64) [3]float64 {
 			filtered[index] = value
 			continue
 		}
-		filtered[index] += e.config.ActionSmoothingAlpha * (value - filtered[index])
+		// Do not allow smoothing to send a stale command in the opposite
+		// direction from a new policy command. This is especially important for
+		// vertical movement near the upper workspace limit: SAC exploration may
+		// alternate signs, but a new negative command must never remain positive
+		// merely because the previous filtered command was upward.
+		if value != 0 && filtered[index]*value < 0 {
+			filtered[index] = e.config.ActionSmoothingAlpha * value
+		} else {
+			filtered[index] += e.config.ActionSmoothingAlpha * (value - filtered[index])
+		}
 		if math.Abs(filtered[index]) < e.config.ActionDeadZone {
+			if filtered[index] != 0 {
+				e.filterDeadZoneRemoved[index] = true
+			}
 			filtered[index] = 0
 		}
 	}
@@ -472,13 +564,35 @@ func (e *Environment) detectFailure(previous State) string {
 		return "unsafe_drop"
 	case previous.Phase == PhaseReleaseObject && !e.state.Grip.ObjectAttached && !e.objectInsideTarget():
 		return "release_outside_target"
-	case e.state.EpisodeStep >= e.config.MaxEpisodeSteps:
+	case e.state.EpisodeStep >= e.maxEpisodeSteps():
 		return "timeout"
 	}
 	return ""
 }
 
+func (e *Environment) maxEpisodeSteps() int {
+	if e.config.Curriculum.Stage != CurriculumFullPickAndPlace && e.config.Curriculum.EpisodeStepLimit > 0 {
+		return e.config.Curriculum.EpisodeStepLimit
+	}
+	return e.config.MaxEpisodeSteps
+}
+
 func (e *Environment) updatePhase(previous State) {
+	if e.config.Curriculum.Stage == CurriculumLowerAndContact {
+		if e.state.Grip.ContactDetected && math.Abs(e.state.GripperVelocityY) <= e.config.StableVelocityThreshold && math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
+			e.contactStableFrames++
+		} else {
+			e.contactStableFrames = 0
+		}
+		if e.contactStableFrames >= e.config.Curriculum.ContactStableSteps {
+			e.state.Phase = PhaseSuccess
+		}
+		return
+	}
+	if e.config.Curriculum.Stage == CurriculumGraspAndLift && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
+		e.state.Phase = PhaseSuccess
+		return
+	}
 	switch previous.Phase {
 	case PhaseApproachObject:
 		if math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance {
@@ -518,7 +632,12 @@ func (e *Environment) updatePhase(previous State) {
 }
 
 func (e *Environment) reward(previous State, gripRateAction, previousGripRateAction float64) RewardBreakdown {
-	breakdown := RewardBreakdown{Penalty: e.config.Reward.TimePenalty}
+	breakdown := RewardBreakdown{Homeostasis: e.lastEnergyDelta}
+	// The enabled homeostatic decay replaces the ordinary time penalty so an
+	// idle step has one clear, visible baseline cost instead of two.
+	if !e.config.Homeostasis.Enabled {
+		breakdown.Penalty = e.config.Reward.TimePenalty
+	}
 	attached := e.state.Grip.ObjectAttached
 	if previous.Phase == PhaseApproachObject && !attached {
 		breakdown.Approach = e.config.Reward.ApproachProgressScale * (gripperObjectDistance(previous) - gripperObjectDistance(e.state))
@@ -554,6 +673,19 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 		breakdown.Penalty += e.config.Reward.InvalidGripPenalty
 		e.invalidGripPenaltyAwarded = true
 	}
+	// Closing in empty space remains costly on every step. The one-time event
+	// penalty above marks the mistake; this small continuing cost prevents an
+	// idle closed gripper from becoming a cheap equilibrium.
+	if !attached && e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected {
+		breakdown.Penalty += e.config.Reward.EmptyGripStepPenalty
+	}
+	// Progress shaping rewards useful approach/lowering motion. A small cost for
+	// no physical movement in those phases removes the otherwise nearly-free
+	// hover policy without selecting a direction on the policy's behalf.
+	if !attached && (previous.Phase == PhaseApproachObject || previous.Phase == PhaseLowerToObject) &&
+		math.Abs(e.state.CarriageX-previous.CarriageX) < 1e-9 && math.Abs(e.state.GripperY-previous.GripperY) < 1e-9 {
+		breakdown.Penalty += e.config.Reward.InactivityPenalty
+	}
 	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !attached {
 		// Force must converge to the attachment threshold. Signed progress makes
 		// oscillating above and below the threshold non-profitable, while the
@@ -575,8 +707,58 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 	if e.state.BoundaryHit {
 		breakdown.Penalty += e.config.Reward.BoundaryCollisionPenalty
 	}
-	breakdown.Total = breakdown.Approach + breakdown.Grip + breakdown.Lift + breakdown.Delivery + breakdown.Penalty
+	breakdown.Total = breakdown.Approach + breakdown.Grip + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
 	return breakdown
+}
+
+// updateHomeostasis applies exactly one energy decay plus a possible one-time
+// verified milestone gain or terminal safety loss for this valid environment
+// step. It never changes an action or task phase.
+func (e *Environment) updateHomeostasis(failureReason string) {
+	e.lastEnergyDelta, e.lastEnergyDecay, e.lastEnergyFoodGain = 0, 0, 0
+	e.lastEnergyEvent = energyEventNone
+	if !e.config.Homeostasis.Enabled {
+		return
+	}
+
+	delta := -e.config.Homeostasis.EnergyDecayPerStep
+	e.lastEnergyDecay = -e.config.Homeostasis.EnergyDecayPerStep
+	attached := e.state.Grip.ObjectAttached && !e.state.Grip.Slipping
+	switch {
+	case failureReason == "object_break":
+		delta -= e.config.Homeostasis.BreakEnergyLoss
+		e.lastEnergyEvent = energyEventBreak
+	case failureReason == "unsafe_drop" || failureReason == "release_outside_target" || failureReason == "workspace_violation":
+		delta -= e.config.Homeostasis.UnsafeDropEnergyLoss
+		e.lastEnergyEvent = energyEventUnsafeDrop
+	case e.state.Phase == PhaseSuccess && !e.successFoodAwarded:
+		delta += e.config.Homeostasis.SuccessfulPlacementEnergyGain
+		e.lastEnergyFoodGain = e.config.Homeostasis.SuccessfulPlacementEnergyGain
+		e.successFoodAwarded = true
+		e.lastEnergyEvent = energyEventSuccess
+	case attached && e.objectHorizontallyInsideTarget() && !e.deliveryFoodAwarded:
+		delta += e.config.Homeostasis.DeliveryEnergyGain
+		e.lastEnergyFoodGain = e.config.Homeostasis.DeliveryEnergyGain
+		e.deliveryFoodAwarded = true
+		e.lastEnergyEvent = energyEventDelivery
+	case attached && e.state.ObjectY >= e.requiredCarryHeight() && !e.liftFoodAwarded:
+		delta += e.config.Homeostasis.LiftEnergyGain
+		e.lastEnergyFoodGain = e.config.Homeostasis.LiftEnergyGain
+		e.liftFoodAwarded = true
+		e.lastEnergyEvent = energyEventLift
+	case attached && !e.gripFoodAwarded:
+		delta += e.config.Homeostasis.SecureGripEnergyGain
+		e.lastEnergyFoodGain = e.config.Homeostasis.SecureGripEnergyGain
+		e.gripFoodAwarded = true
+		e.lastEnergyEvent = energyEventSecureGrasp
+	}
+
+	previousEnergy := e.state.Energy
+	e.state.Energy = clamp(previousEnergy+delta, 0, 1)
+	e.lastEnergyDelta = e.state.Energy - previousEnergy
+	if e.lastEnergyDelta >= 0 && e.lastEnergyFoodGain > e.lastEnergyDelta {
+		e.lastEnergyFoodGain = e.lastEnergyDelta
+	}
 }
 
 func (e *Environment) failurePenalty(reason string) float64 {
@@ -589,6 +771,42 @@ func (e *Environment) failurePenalty(reason string) float64 {
 		return e.config.Reward.DroppedObjectPenalty
 	default:
 		return e.config.Reward.UnsafeDropPenalty
+	}
+}
+
+// failureReasonCode keeps the framework's numeric Info transport compact while
+// allowing the API/UI to aggregate real terminal causes.
+func (e *Environment) failureReasonCode() int {
+	switch e.failureReason {
+	case "timeout":
+		return 1
+	case "unsafe_drop":
+		return 2
+	case "release_outside_target":
+		return 3
+	case "object_break":
+		return 4
+	case "workspace_violation":
+		return 5
+	case "invalid_state":
+		return 6
+	default:
+		return 0
+	}
+}
+
+func (e *Environment) curriculumStageCode() int {
+	switch e.config.Curriculum.Stage {
+	case CurriculumLowerAndContact:
+		return 1
+	case CurriculumGraspAndLift:
+		return 2
+	case CurriculumTransportAndRelease:
+		return 3
+	case CurriculumFullPickAndPlace:
+		return 4
+	default:
+		return 0
 	}
 }
 
@@ -617,6 +835,7 @@ func (e *Environment) observation() []float32 {
 		normalize(float64(state.Phase), float64(PhaseIdle), float64(PhaseFailure)),
 		boolValue(state.Grip.ContactDetected),
 		e.requiredGripForceBaseline(),
+		normalize01(state.Energy),
 	}
 	result := make([]float32, len(values))
 	for index, value := range values {
@@ -679,7 +898,7 @@ func (e *Environment) ValidateState() error {
 	state := e.state
 	for name, value := range map[string]float64{
 		"carriage_x": state.CarriageX, "gripper_y": state.GripperY, "object_x": state.ObjectX, "object_y": state.ObjectY,
-		"target_x": state.TargetX, "target_y": state.TargetY, "velocity_x": state.CarriageVelocityX, "velocity_y": state.GripperVelocityY,
+		"target_x": state.TargetX, "target_y": state.TargetY, "velocity_x": state.CarriageVelocityX, "velocity_y": state.GripperVelocityY, "energy": state.Energy,
 	} {
 		if !finite(value) {
 			return fmt.Errorf("%s is non-finite", name)
@@ -690,6 +909,9 @@ func (e *Environment) ValidateState() error {
 	}
 	if state.ObjectX < workspace.MinX || state.ObjectX > workspace.MaxX || state.ObjectY < workspace.MinY || state.ObjectY > workspace.MaxY || state.TargetX < workspace.MinX || state.TargetX > workspace.MaxX || state.TargetY < workspace.MinY || state.TargetY > workspace.MaxY {
 		return errors.New("object or target outside workspace")
+	}
+	if state.Energy < 0 || state.Energy > 1 {
+		return fmt.Errorf("energy %g is outside [0, 1]", state.Energy)
 	}
 	return nil
 }

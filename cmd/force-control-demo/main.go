@@ -35,6 +35,9 @@ func main() {
 
 	runtime := framework.NewRuntime()
 	config := forcecontrol.DefaultConfig()
+	if stage := os.Getenv("FORCE_CONTROL_CURRICULUM"); stage != "" {
+		config.Curriculum.Stage = forcecontrol.CurriculumStage(stage)
+	}
 	if err := forcecontrol.Register(runtime, config); err != nil {
 		log.Fatalf("register force-control task: %v", err)
 	}

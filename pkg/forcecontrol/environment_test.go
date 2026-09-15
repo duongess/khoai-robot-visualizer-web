@@ -97,14 +97,11 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 		t.Fatalf("grip bonus was repeated: first=%v second=%v", grip.Reward, again.Reward)
 	}
 
-	broken := NewTask(1, config)
-	_, _ = broken.Reset()
-	var result framework.StepResult
-	for step := 0; step < 30 && !result.Done; step++ {
-		result, err = broken.Step(framework.Action{0, 0, 1})
-		if err != nil {
-			t.Fatal(err)
-		}
+	broken := attachedTask(t, config)
+	broken.environment.state.GripForce = broken.environment.state.ObjectBreakForce
+	result, err := broken.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !result.Done || result.Outcome != OutcomeFailure {
 		t.Fatalf("break result=%#v error=%v", result, err)
@@ -241,7 +238,7 @@ func TestInvalidInitialStateIsRejected(t *testing.T) {
 
 func TestRegistrationRejectsImpossibleSafeGripBand(t *testing.T) {
 	config := DefaultConfig()
-	config.ObjectBreakForce = 10 // below the configured 11.21 N required force
+	config.ObjectBreakForce = config.MaxGripForce + 1
 	if err := Register(framework.NewRuntime(), config); err == nil {
 		t.Fatal("expected an impossible safe grip-force interval to be rejected")
 	}
@@ -378,7 +375,7 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 		t.Fatal(err)
 	}
-	if got, limit := task.environment.state.GripForce, 0.5*config.ActionSmoothingAlpha*config.MaxGripForceRate*config.TimeStep; math.Abs(got-limit) > 1e-9 {
+	if got, limit := task.environment.state.GripForce, 0.5*config.MaxGripForceRate*config.TimeStep; math.Abs(got-limit) > 1e-9 {
 		t.Fatalf("first grip-force increment = %v, want rate-limited %v", got, limit)
 	}
 	firstForce := task.environment.state.GripForce
@@ -394,6 +391,121 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	if task.environment.state.GripForce != 0 || task.environment.state.Grip.GripperClosed {
 		t.Fatalf("release command did not immediately open: %#v", task.environment.state.Grip)
 	}
+}
+
+func TestContinuousPolicyForceRespondsToSlipDuringLift(t *testing.T) {
+	task := attachedTask(t, DefaultConfig())
+	baseForce := task.environment.state.GripForce
+	result, err := task.Step(framework.Action{0, 1, 0})
+	if err != nil || result.Done || !task.environment.state.Grip.Slipping || result.Info["slip_severity"] <= 0 {
+		t.Fatalf("lift without added force did not expose recoverable slip: result=%#v state=%#v err=%v", result, task.environment.state.Grip, err)
+	}
+	for step := 0; step < task.config.SlipDetachFrames-1 && task.environment.state.Grip.Slipping; step++ {
+		result, err = task.Step(framework.Action{0, 1, 1})
+		if err != nil || result.Done {
+			t.Fatalf("policy could not recover slip at step %d: result=%#v err=%v", step, result, err)
+		}
+	}
+	if task.environment.state.Grip.Slipping || !task.environment.state.Grip.ObjectAttached || task.environment.state.GripForce <= baseForce {
+		t.Fatalf("increased policy force did not recover stable lift: %#v", task.environment.state)
+	}
+}
+
+func TestExcessForceAndAbruptForceChangesArePenalized(t *testing.T) {
+	low := attachedTask(t, DefaultConfig())
+	high := attachedTask(t, DefaultConfig())
+	high.environment.state.GripForce = high.environment.requiredForce() + 4
+	lowResult, err := low.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	highResult, err := high.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if highResult.Reward >= lowResult.Reward {
+		t.Fatalf("excess force was not less rewarding: low=%v high=%v", lowResult.Reward, highResult.Reward)
+	}
+	changed, err := low.Step(framework.Action{0, 0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Info["penalty_reward"] >= lowResult.Info["penalty_reward"] {
+		t.Fatalf("abrupt force change was not penalized: steady=%#v changed=%#v", lowResult.Info, changed.Info)
+	}
+}
+
+func TestMassAndFrictionChangePolicyForceDemandWithoutLeakingRequirement(t *testing.T) {
+	lightConfig := DefaultConfig()
+	heavyConfig := DefaultConfig()
+	heavyConfig.InitialObjectMass = 0.95
+	heavyConfig.ObjectFriction = 0.32
+	for _, config := range []*Config{&lightConfig, &heavyConfig} {
+		config.InitialCarriageX = config.InitialObjectX
+		config.InitialGripperY = GraspHeight(*config, terrainHeightForConfig(*config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
+	}
+	light := NewTask(1, lightConfig)
+	heavy := NewTask(1, heavyConfig)
+	for _, task := range []*Task{light, heavy} {
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lightSteps, heavySteps := forceStepsToAttach(t, light), forceStepsToAttach(t, heavy)
+	if heavySteps <= lightSteps {
+		t.Fatalf("heavier/lower-friction object did not require more policy force steps: light=%d heavy=%d", lightSteps, heavySteps)
+	}
+	if light.environment.observation()[observationRequiredGripForceBaseline] != 0 || heavy.environment.observation()[observationRequiredGripForceBaseline] != 0 {
+		t.Fatal("default policy observation leaked analytic required force")
+	}
+}
+
+func TestContinuousGripDetachesOnlyForReleaseOrSustainedLoss(t *testing.T) {
+	released := attachedTask(t, DefaultConfig())
+	if _, err := released.Step(framework.Action{0, 0, -1}); err != nil {
+		t.Fatal(err)
+	}
+	if released.environment.state.Grip.ObjectAttached || released.environment.state.GripForce != 0 {
+		t.Fatalf("explicit release did not detach: %#v", released.environment.state)
+	}
+
+	insufficient := attachedTask(t, DefaultConfig())
+	for step := 0; step < insufficient.config.SlipDetachFrames; step++ {
+		if _, err := insufficient.Step(framework.Action{0, 1, -0.5}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if insufficient.environment.state.Grip.ObjectAttached {
+		t.Fatal("persistent insufficient force did not detach")
+	}
+
+	contactLost := attachedTask(t, DefaultConfig())
+	for frame := 0; frame < contactLost.config.GripDetachInvalidFrames; frame++ {
+		contactLost.environment.state.ObjectX = contactLost.environment.state.CarriageX + 1
+		if _, err := contactLost.Step(framework.Action{0, 0, 0}); err != nil {
+			t.Fatal(err)
+		}
+		if frame+1 < contactLost.config.GripDetachInvalidFrames && !contactLost.environment.state.Grip.ObjectAttached {
+			t.Fatalf("contact hysteresis detached after %d invalid frames", frame+1)
+		}
+	}
+	if contactLost.environment.state.Grip.ObjectAttached {
+		t.Fatal("sustained lost contact did not detach")
+	}
+}
+
+func forceStepsToAttach(t *testing.T, task *Task) int {
+	t.Helper()
+	for step := 1; step <= 40; step++ {
+		if _, err := task.Step(framework.Action{0, 0, 1}); err != nil {
+			t.Fatal(err)
+		}
+		if task.environment.state.Grip.ObjectAttached {
+			return step
+		}
+	}
+	t.Fatalf("policy force did not attach object: %#v", task.environment.state)
+	return 0
 }
 
 func TestMotionFilteringDeadZoneAndAccelerationBounds(t *testing.T) {
@@ -558,13 +670,13 @@ func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
 		case PhaseLowerToObject:
 			action = framework.Action{0, -1, -1}
 		case PhaseGripObject:
-			action = framework.Action{0, 0, 0.5}
+			action = framework.Action{0, 0, testPolicyGripRate(task)}
 		case PhaseLiftObject:
-			action = framework.Action{0, 1, 0}
+			action = framework.Action{0, 1, testPolicyGripRate(task)}
 		case PhaseMoveToTarget:
-			action = framework.Action{1, 0, 0}
+			action = framework.Action{1, 0, testPolicyGripRate(task)}
 		case PhaseLowerAtTarget:
-			action = framework.Action{0, -1, 0}
+			action = framework.Action{0, -1, testPolicyGripRate(task)}
 		default:
 			t.Fatalf("cannot advance from phase %s", phase)
 		}
@@ -578,5 +690,21 @@ func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
 	}
 	if task.environment.state.Phase != wanted {
 		t.Fatalf("phase=%s, want %s", task.environment.state.Phase, wanted)
+	}
+}
+
+// testPolicyGripRate is a privileged test-only reference policy used to drive
+// the scripted lifecycle; production SAC receives slip/contact feedback rather
+// than this analytic force value.
+func testPolicyGripRate(task *Task) float32 {
+	desired := task.environment.requiredForce() + 0.3
+	force := task.environment.state.GripForce
+	switch {
+	case force < desired-0.2:
+		return 1
+	case force > desired+0.5:
+		return -0.5
+	default:
+		return 0
 	}
 }

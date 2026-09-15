@@ -216,6 +216,10 @@ export interface WorkerState {
 		velocity_y: number;
 		error_x: number;
 		error_y: number;
+		vertical_acceleration?: number;
+		invalid_contact_frames?: number;
+		slip_severity?: number;
+		slip_frames?: number;
 	};
   velocity_y?: number;
   target_grasp_y?: number;
@@ -223,6 +227,7 @@ export interface WorkerState {
 	contact_detected?: boolean;
 	object_attached?: boolean;
 	object_stable?: boolean;
+	slipping?: boolean;
 	approach_reward?: number;
 	grip_reward?: number;
 	delivery_reward?: number;

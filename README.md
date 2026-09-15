@@ -31,7 +31,12 @@ requires a released object to settle inside the target zone for the configured
 number of steps. Telemetry exposes contact, attachment, object state, and each
 reward component for diagnosis.
 
-The coordinate/action/reward schema is version 7. This learner currently has no
+The coordinate/action/reward schema is version 9. The force action is a
+continuous policy-controlled actuator rate on every step; after attachment the
+environment reports slip feedback but never selects a grip-force target. The
+analytic required force is withheld from the default 22-value policy
+observation and is available only through an explicit privileged baseline flag.
+This learner currently has no
 checkpoint-loading path. Any future loader must call
 `forcecontrol.ValidateCheckpointSchema`; earlier policies and replay data must
 be discarded because they may contain exploitable reward transitions.

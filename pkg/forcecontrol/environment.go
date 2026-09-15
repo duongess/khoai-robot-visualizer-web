@@ -8,11 +8,11 @@ import (
 )
 
 // ObservationDimension is the fixed goal-conditioned policy input size.
-const ObservationDimension = 21
+const ObservationDimension = 22
 
 // CoordinateSystemVersion changes whenever action meaning or observation
 // normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 7
+const CoordinateSystemVersion = 9
 
 const (
 	observationGripperX = iota
@@ -32,10 +32,11 @@ const (
 	observationGripperClosed
 	observationObjectGripped
 	observationGripForce
-	observationRequiredGripForce
-	observationBreakForce
+	observationSlipSeverity
+	observationGripperVerticalAcceleration
 	observationPhase
 	observationContactDetected
+	observationRequiredGripForceBaseline
 )
 
 // GripState distinguishes a command to close the gripper from physical object
@@ -45,6 +46,7 @@ type GripState struct {
 	ContactDetected bool
 	ForceValid      bool
 	ObjectAttached  bool
+	Slipping        bool
 }
 
 // RewardBreakdown keeps every reward term observable so training behaviour can
@@ -154,6 +156,11 @@ type Environment struct {
 	lastReward                     RewardBreakdown
 	lastGripRateAction             float64
 	filteredAction                 [3]float64
+	verticalAcceleration           float64
+	invalidContactFrames           int
+	slipFrames                     int
+	releaseCommanded               bool
+	contactBeforeMotion            bool
 }
 
 func newEnvironment(seed int64, config Config) *Environment {
@@ -186,6 +193,11 @@ func (e *Environment) reset() State {
 	e.lastReward = RewardBreakdown{}
 	e.lastGripRateAction = 0
 	e.filteredAction = [3]float64{}
+	e.verticalAcceleration = 0
+	e.invalidContactFrames = 0
+	e.slipFrames = 0
+	e.releaseCommanded = false
+	e.contactBeforeMotion = false
 	e.ready = true
 	return e.state
 }
@@ -205,9 +217,19 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	filteredValues := e.filterAction(values)
 	previous := e.state
 	previousGripRateAction := e.lastGripRateAction
+	e.contactBeforeMotion = e.contactDetected()
 	e.state.BoundaryHit = false
 	e.applyHorizontalControl(filteredValues[0])
 	e.applyVerticalControl(filteredValues[1])
+	// Only upward motion requires extra carrying force. A lower-bound collision
+	// can stop a downward carriage abruptly; treating that braking impulse as a
+	// lift demand would create a fictitious force requirement and drop a valid
+	// object at the target.
+	e.verticalAcceleration = 0
+	if e.state.GripperVelocityY > 0 {
+		e.verticalAcceleration = math.Max(0, (e.state.GripperVelocityY-previous.GripperVelocityY)/e.config.TimeStep)
+	}
+	e.releaseCommanded = false
 	e.applyGripControl(filteredValues[2])
 	e.lastGripRateAction = filteredValues[2]
 	e.updateGripState()
@@ -273,6 +295,13 @@ func (e *Environment) filterAction(raw [3]float64) [3]float64 {
 			filtered[index] = value
 			continue
 		}
+		// Grip is deliberately not smoothed: it is the actor's continuous force
+		// rate command on every step. Smooth force behaviour is learned through
+		// the transition dynamics and reward, not held by a hidden controller.
+		if index == 2 {
+			filtered[index] = value
+			continue
+		}
 		filtered[index] += e.config.ActionSmoothingAlpha * (value - filtered[index])
 		if math.Abs(filtered[index]) < e.config.ActionDeadZone {
 			filtered[index] = 0
@@ -317,20 +346,25 @@ func (e *Environment) applyGripControl(value float64) {
 	if value <= e.config.ReleaseActionThreshold {
 		e.state.GripperOpening = 1
 		e.state.GripForce = 0
+		e.releaseCommanded = true
 		return
 	}
 	e.state.GripperOpening = 0
+	// No target or hold force is selected here. The actor continuously controls
+	// the signed actuator rate; this layer only enforces hardware/material caps.
 	deltaForce := value * e.config.MaxGripForceRate * e.config.TimeStep
-	e.state.GripForce = clamp(e.state.GripForce+deltaForce, 0, e.config.MaxGripForce)
+	e.state.GripForce = clamp(e.state.GripForce+deltaForce, 0, math.Min(e.config.MaxGripForce, e.state.ObjectBreakForce))
 }
 
 func (e *Environment) updateGripState() {
 	state := &e.state
 	contact := e.contactDetected()
-	// The attachment constraint keeps the object at the grasp point while it is
-	// held. It therefore remains in contact across one control integration step.
+	// The kinematic attachment is updated after this state check. Use the
+	// contact sampled before the carriage moved, otherwise a valid fast lift
+	// would appear to lose contact merely because the object has not yet been
+	// advanced to the new grasp point for this same fixed step.
 	if state.Grip.ObjectAttached {
-		contact = true
+		contact = e.contactBeforeMotion
 	}
 	grip := GripState{
 		GripperClosed:   state.GripperOpening <= e.config.ClosedOpeningThreshold,
@@ -345,8 +379,32 @@ func (e *Environment) updateGripState() {
 		state.ObjectBroken = true
 		grip.ObjectAttached = false
 	} else if state.Grip.ObjectAttached {
-		grip.ObjectAttached = grip.GripperClosed && grip.ContactDetected && grip.ForceValid
+		switch {
+		case e.releaseCommanded:
+			e.invalidContactFrames = 0
+			e.slipFrames = 0
+			grip.ObjectAttached = false
+		case !grip.GripperClosed:
+			e.invalidContactFrames = 0
+			e.slipFrames = 0
+			grip.ObjectAttached = false
+		case !grip.ContactDetected:
+			e.invalidContactFrames++
+			e.slipFrames = 0
+			grip.ObjectAttached = e.invalidContactFrames < e.config.GripDetachInvalidFrames
+		case !grip.ForceValid:
+			e.invalidContactFrames = 0
+			e.slipFrames++
+			grip.Slipping = true
+			grip.ObjectAttached = e.slipFrames < e.config.SlipDetachFrames
+		default:
+			e.invalidContactFrames = 0
+			e.slipFrames = 0
+			grip.ObjectAttached = true
+		}
 	} else {
+		e.invalidContactFrames = 0
+		e.slipFrames = 0
 		grip.ObjectAttached = grip.GripperClosed && grip.ContactDetected && grip.ForceValid
 	}
 	state.Grip = grip
@@ -363,6 +421,17 @@ func (e *Environment) contactDetected() bool {
 
 func (e *Environment) updateObjectPhysics() {
 	if e.state.Grip.ObjectAttached {
+		if e.state.Grip.Slipping {
+			// Partial frictional support: insufficient force lets the object lag
+			// and fall, giving the policy observable slip feedback and time to
+			// increase its own force command before detachment.
+			support := 1 - e.slipSeverity()
+			e.state.ObjectVelocityX = e.state.CarriageVelocityX * support
+			e.state.ObjectVelocityY = e.state.GripperVelocityY*support - e.config.Gravity*(1-support)*e.config.TimeStep
+			e.state.ObjectX += e.state.ObjectVelocityX * e.config.TimeStep
+			e.state.ObjectY += e.state.ObjectVelocityY * e.config.TimeStep
+			return
+		}
 		e.state.ObjectVelocityX, e.state.ObjectVelocityY = e.state.CarriageVelocityX, e.state.GripperVelocityY
 		e.state.ObjectX = e.state.CarriageX
 		e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
@@ -426,19 +495,19 @@ func (e *Environment) updatePhase(previous State) {
 			e.state.Phase = PhaseApproachObject
 		} else if math.Abs(e.state.GripperY-e.objectGripHeight()) > e.config.VerticalTolerance {
 			e.state.Phase = PhaseLowerToObject
-		} else if e.state.Grip.ObjectAttached {
+		} else if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping {
 			e.state.Phase = PhaseLiftObject
 		}
 	case PhaseLiftObject:
-		if e.state.Grip.ObjectAttached && e.state.ObjectY >= e.requiredCarryHeight() {
+		if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
 			e.state.Phase = PhaseMoveToTarget
 		}
 	case PhaseMoveToTarget:
-		if e.state.Grip.ObjectAttached && e.objectHorizontallyInsideTarget() {
+		if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.objectHorizontallyInsideTarget() {
 			e.state.Phase = PhaseLowerAtTarget
 		}
 	case PhaseLowerAtTarget:
-		if e.state.Grip.ObjectAttached && e.objectHorizontallyInsideTarget() && e.state.GripperY <= e.targetReleaseGuideHeight()+e.config.ReleaseTolerance {
+		if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.objectHorizontallyInsideTarget() && e.state.GripperY <= e.targetReleaseGuideHeight()+e.config.ReleaseTolerance {
 			e.state.Phase = PhaseReleaseObject
 		}
 	case PhaseReleaseObject:
@@ -463,18 +532,22 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
 	}
-	if previous.Phase == PhaseLiftObject && previous.Grip.ObjectAttached && attached {
+	if previous.Phase == PhaseLiftObject && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
 		breakdown.Lift = e.config.Reward.LiftProgressScale * (e.state.ObjectY - previous.ObjectY)
 	}
 	// Delivery reward is intentionally impossible without a secure attachment.
 	// It is measured from object-to-target distance, never gripper-to-target.
-	if previous.Phase == PhaseMoveToTarget && previous.Grip.ObjectAttached && attached {
+	if previous.Phase == PhaseMoveToTarget && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
 		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * (targetDistance(previous) - targetDistance(e.state))
 	}
 	if previous.Grip.ObjectAttached && attached && previous.Phase != PhaseReleaseObject {
 		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(gripRateAction-previousGripRateAction)
-		if e.state.Grip.ForceValid && math.Abs(gripRateAction) <= e.config.ActionDeadZone {
+		breakdown.Penalty -= e.config.Reward.GripForceChangePenaltyScale * math.Abs(e.state.GripForce-previous.GripForce)
+		if e.state.Grip.Slipping {
+			breakdown.Penalty += e.config.Reward.SlipPenalty
+		} else if e.state.Grip.ForceValid {
 			breakdown.Grip += e.config.Reward.AttachedForceStabilityReward
+			breakdown.Penalty -= e.config.Reward.ExcessGripForcePenaltyScale * math.Max(0, e.state.GripForce-e.requiredForce())
 		}
 	}
 	if e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected && !e.invalidGripPenaltyAwarded {
@@ -539,10 +612,11 @@ func (e *Environment) observation() []float32 {
 		normalize01(1 - state.GripperOpening),
 		boolValue(state.Grip.ObjectAttached),
 		normalize(state.GripForce, 0, e.config.MaxGripForce),
-		normalize(e.requiredForce(), 0, e.config.MaxGripForce),
-		normalize(state.ObjectBreakForce, 0, e.config.MaxGripForce),
+		normalize01(e.slipSeverity()),
+		normalize(e.verticalAcceleration, -e.config.MaxVerticalAcceleration, e.config.MaxVerticalAcceleration),
 		normalize(float64(state.Phase), float64(PhaseIdle), float64(PhaseFailure)),
 		boolValue(state.Grip.ContactDetected),
+		e.requiredGripForceBaseline(),
 	}
 	result := make([]float32, len(values))
 	for index, value := range values {
@@ -553,6 +627,13 @@ func (e *Environment) observation() []float32 {
 		}
 	}
 	return result
+}
+
+func (e *Environment) requiredGripForceBaseline() float64 {
+	if !e.config.ExposeRequiredGripForceBaseline {
+		return 0
+	}
+	return normalize(e.requiredForce(), 0, e.config.MaxGripForce)
 }
 
 func (e *Environment) objectGripHeight() float64 {
@@ -614,7 +695,14 @@ func (e *Environment) ValidateState() error {
 }
 
 func (e *Environment) requiredForce() float64 {
-	return e.state.ObjectMass * e.config.Gravity / (2 * e.state.ObjectFriction)
+	return e.state.ObjectMass * (e.config.Gravity + math.Max(0, e.verticalAcceleration)) / (2 * e.state.ObjectFriction)
+}
+
+func (e *Environment) slipSeverity() float64 {
+	if !e.state.Grip.ObjectAttached || e.requiredForce() <= 0 {
+		return 0
+	}
+	return clamp((e.requiredForce()-e.state.GripForce)/e.requiredForce(), 0, 1)
 }
 func (e *Environment) objectInsideTarget() bool {
 	return e.objectHorizontallyInsideTarget() && math.Abs(e.state.ObjectY-e.targetRestHeight()) <= e.config.ReleaseTolerance

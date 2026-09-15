@@ -17,6 +17,9 @@ type RewardConfig struct {
 	InsufficientGripStepPenalty  float64
 	GripForceProgressScale       float64
 	GripActionChangePenalty      float64
+	GripForceChangePenaltyScale  float64
+	SlipPenalty                  float64
+	ExcessGripForcePenaltyScale  float64
 	AttachedForceStabilityReward float64
 	InvalidGripPenalty           float64
 	EmptyTargetPenalty           float64
@@ -63,6 +66,10 @@ type Config struct {
 	// each physics step. It must be in (0, 1]; a release remains immediate.
 	ActionSmoothingAlpha float64
 	MaxGripForce         float64
+	// GripDetachInvalidFrames and SlipDetachFrames model physical persistence;
+	// neither field selects or maintains a force for the policy.
+	GripDetachInvalidFrames int
+	SlipDetachFrames        int
 	// MaxGripForceRate is the magnitude of the differential force command in
 	// N/s at action[2] = +/-1; it is not an absolute target force.
 	MaxGripForceRate float64
@@ -91,9 +98,12 @@ type Config struct {
 	LiftClearance            float64
 	ReleaseTolerance         float64
 	ActionDeadZone           float64
-	MaxEpisodeSteps          int
-	Reward                   RewardConfig
-	Terrain                  []TerrainPoint
+	// ExposeRequiredGripForceBaseline enables privileged analytic force only for
+	// an explicit baseline experiment. Learned controllers keep this false.
+	ExposeRequiredGripForceBaseline bool
+	MaxEpisodeSteps                 int
+	Reward                          RewardConfig
+	Terrain                         []TerrainPoint
 }
 
 // DefaultConfig returns a deterministic configuration for the MVP task.
@@ -112,6 +122,8 @@ func DefaultConfig() Config {
 		MaxVerticalAcceleration:   3.0,
 		ActionSmoothingAlpha:      0.30,
 		MaxGripForce:              20,
+		GripDetachInvalidFrames:   3,
+		SlipDetachFrames:          4,
 		MaxGripForceRate:          12,
 		ReleaseActionThreshold:    -0.85,
 		TimeStep:                  0.1,
@@ -151,6 +163,9 @@ func DefaultConfig() Config {
 			InsufficientGripStepPenalty:  -0.05,
 			GripForceProgressScale:       0.5,
 			GripActionChangePenalty:      0.02,
+			GripForceChangePenaltyScale:  0.02,
+			SlipPenalty:                  -1.0,
+			ExcessGripForcePenaltyScale:  0.05,
 			AttachedForceStabilityReward: 0.02,
 			InvalidGripPenalty:           -1.0,
 			EmptyTargetPenalty:           -2.0,

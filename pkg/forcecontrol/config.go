@@ -55,7 +55,14 @@ type Config struct {
 	GripperClearance    float64
 	MaxHorizontalSpeed  float64
 	MaxVerticalSpeed    float64
-	MaxGripForce        float64
+	// MaxHorizontalAcceleration and MaxVerticalAcceleration bound velocity
+	// changes per fixed physics step, including reversals near a target.
+	MaxHorizontalAcceleration float64
+	MaxVerticalAcceleration   float64
+	// ActionSmoothingAlpha is the fraction of a non-safety action accepted at
+	// each physics step. It must be in (0, 1]; a release remains immediate.
+	ActionSmoothingAlpha float64
+	MaxGripForce         float64
 	// MaxGripForceRate is the magnitude of the differential force command in
 	// N/s at action[2] = +/-1; it is not an absolute target force.
 	MaxGripForceRate float64
@@ -92,41 +99,44 @@ type Config struct {
 // DefaultConfig returns a deterministic configuration for the MVP task.
 func DefaultConfig() Config {
 	return Config{
-		Seed:                     42,
-		Workspace:                WorkspaceBounds{MinX: 0, MaxX: 6, MinY: 0, MaxY: 3.2},
-		RailY:                    3.1,
-		GripperWidth:             0.55,
-		GripperBodyHeight:        0.16,
-		GripperFingerLength:      0.30,
-		GripperClearance:         0.05,
-		MaxHorizontalSpeed:       1.5,
-		MaxVerticalSpeed:         1.5,
-		MaxGripForce:             20,
-		MaxGripForceRate:         12,
-		ReleaseActionThreshold:   -0.85,
-		TimeStep:                 0.1,
-		Gravity:                  9.81,
-		ObjectWidth:              0.35,
-		ObjectHeight:             0.25,
-		InitialObjectX:           1.5,
-		InitialObjectMass:        0.8,
-		ObjectFriction:           0.35,
-		ObjectBreakForce:         18,
-		InitialCarriageX:         1.5,
-		InitialGripperY:          2.8,
-		TargetX:                  4.5,
-		TargetWidth:              0.8,
-		MaxEpisodeSteps:          300,
-		HorizontalTolerance:      0.15,
-		VerticalTolerance:        0.10,
-		GraspHorizontalTolerance: 0.15,
-		GraspVerticalTolerance:   0.10,
-		ClosedOpeningThreshold:   0.35,
-		StableVelocityThreshold:  0.05,
-		StablePlacementSteps:     3,
-		LiftClearance:            0.60,
-		ReleaseTolerance:         0.08,
-		ActionDeadZone:           0.03,
+		Seed:                      42,
+		Workspace:                 WorkspaceBounds{MinX: 0, MaxX: 6, MinY: 0, MaxY: 3.2},
+		RailY:                     3.1,
+		GripperWidth:              0.55,
+		GripperBodyHeight:         0.16,
+		GripperFingerLength:       0.30,
+		GripperClearance:          0.05,
+		MaxHorizontalSpeed:        1.5,
+		MaxVerticalSpeed:          1.5,
+		MaxHorizontalAcceleration: 3.0,
+		MaxVerticalAcceleration:   3.0,
+		ActionSmoothingAlpha:      0.30,
+		MaxGripForce:              20,
+		MaxGripForceRate:          12,
+		ReleaseActionThreshold:    -0.85,
+		TimeStep:                  0.1,
+		Gravity:                   9.81,
+		ObjectWidth:               0.35,
+		ObjectHeight:              0.25,
+		InitialObjectX:            1.5,
+		InitialObjectMass:         0.8,
+		ObjectFriction:            0.35,
+		ObjectBreakForce:          18,
+		InitialCarriageX:          1.5,
+		InitialGripperY:           2.8,
+		TargetX:                   4.5,
+		TargetWidth:               0.8,
+		MaxEpisodeSteps:           300,
+		HorizontalTolerance:       0.15,
+		VerticalTolerance:         0.10,
+		GraspHorizontalTolerance:  0.15,
+		GraspVerticalTolerance:    0.10,
+		ClosedOpeningThreshold:    0.35,
+		StableVelocityThreshold:   0.05,
+		StablePlacementSteps:      3,
+		LiftClearance:             0.60,
+		ReleaseTolerance:          0.08,
+		ActionDeadZone:            0.03,
 		Reward: RewardConfig{
 			TimePenalty:                  -0.001,
 			ApproachProgressScale:        1.0,

@@ -12,7 +12,7 @@ const ObservationDimension = 21
 
 // CoordinateSystemVersion changes whenever action meaning or observation
 // normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 6
+const CoordinateSystemVersion = 7
 
 const (
 	observationGripperX = iota
@@ -153,6 +153,7 @@ type Environment struct {
 	failureReason                  string
 	lastReward                     RewardBreakdown
 	lastGripRateAction             float64
+	filteredAction                 [3]float64
 }
 
 func newEnvironment(seed int64, config Config) *Environment {
@@ -184,6 +185,7 @@ func (e *Environment) reset() State {
 	e.failureReason = ""
 	e.lastReward = RewardBreakdown{}
 	e.lastGripRateAction = 0
+	e.filteredAction = [3]float64{}
 	e.ready = true
 	return e.state
 }
@@ -200,13 +202,14 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		return e.state, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
 	}
 
+	filteredValues := e.filterAction(values)
 	previous := e.state
 	previousGripRateAction := e.lastGripRateAction
 	e.state.BoundaryHit = false
-	e.applyHorizontalControl(values[0])
-	e.applyVerticalControl(values[1])
-	e.applyGripControl(values[2])
-	e.lastGripRateAction = values[2]
+	e.applyHorizontalControl(filteredValues[0])
+	e.applyVerticalControl(filteredValues[1])
+	e.applyGripControl(filteredValues[2])
+	e.lastGripRateAction = filteredValues[2]
 	e.updateGripState()
 	if e.state.Grip.ObjectAttached {
 		e.wasEverGrasped = true
@@ -224,14 +227,14 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	terminalReason := e.detectFailure(previous)
 	if terminalReason != "" {
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
-		e.lastReward = e.reward(previous, values[2], previousGripRateAction)
+		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
 		e.lastReward.Total += e.failurePenalty(terminalReason)
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
 	}
 	e.updatePhase(previous)
 	if e.state.Phase == PhaseSuccess {
-		e.lastReward = e.reward(previous, values[2], previousGripRateAction)
+		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 		if !e.successRewardAwarded {
 			e.lastReward.Success = e.config.Reward.SuccessfulPlacement
 			e.lastReward.Total += e.lastReward.Success
@@ -239,7 +242,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
-	e.lastReward = e.reward(previous, values[2], previousGripRateAction)
+	e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
 }
 
@@ -260,8 +263,28 @@ func (e *Environment) validatedAction(action []float32) ([3]float64, error) {
 	return values, nil
 }
 
+// filterAction rejects tiny policy noise and applies a first-order command
+// filter. The explicit emergency release threshold bypasses filtering so it
+// cannot be delayed by a prior closing command.
+func (e *Environment) filterAction(raw [3]float64) [3]float64 {
+	filtered := e.filteredAction
+	for index, value := range raw {
+		if index == 2 && value <= e.config.ReleaseActionThreshold {
+			filtered[index] = value
+			continue
+		}
+		filtered[index] += e.config.ActionSmoothingAlpha * (value - filtered[index])
+		if math.Abs(filtered[index]) < e.config.ActionDeadZone {
+			filtered[index] = 0
+		}
+	}
+	e.filteredAction = filtered
+	return filtered
+}
+
 func (e *Environment) applyHorizontalControl(value float64) {
-	e.state.CarriageVelocityX = value * e.config.MaxHorizontalSpeed
+	targetVelocity := value * e.config.MaxHorizontalSpeed
+	e.state.CarriageVelocityX = slew(e.state.CarriageVelocityX, targetVelocity, e.config.MaxHorizontalAcceleration*e.config.TimeStep)
 	next := e.state.CarriageX + e.state.CarriageVelocityX*e.config.TimeStep
 	safeMinX, safeMaxX, _, _ := e.safeBounds()
 	e.state.CarriageX = clamp(next, safeMinX, safeMaxX)
@@ -272,7 +295,8 @@ func (e *Environment) applyHorizontalControl(value float64) {
 }
 
 func (e *Environment) applyVerticalControl(value float64) {
-	e.state.GripperVelocityY = value * e.config.MaxVerticalSpeed
+	targetVelocity := value * e.config.MaxVerticalSpeed
+	e.state.GripperVelocityY = slew(e.state.GripperVelocityY, targetVelocity, e.config.MaxVerticalAcceleration*e.config.TimeStep)
 	next := e.state.GripperY + e.state.GripperVelocityY*e.config.TimeStep
 	_, _, safeMinY, safeMaxY := e.safeBounds()
 	e.state.GripperY = clamp(next, safeMinY, safeMaxY)
@@ -280,6 +304,10 @@ func (e *Environment) applyVerticalControl(value float64) {
 		e.state.GripperVelocityY = 0
 		e.state.BoundaryHit = true
 	}
+}
+
+func slew(current, target, maximumDelta float64) float64 {
+	return current + clamp(target-current, -maximumDelta, maximumDelta)
 }
 
 func (e *Environment) applyGripControl(value float64) {

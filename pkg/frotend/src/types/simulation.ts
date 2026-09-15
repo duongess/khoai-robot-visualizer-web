@@ -193,6 +193,9 @@ export interface WorkerState {
   };
   last_action: {
     normalized_grip_force: number;
+		filtered_horizontal?: number;
+		filtered_vertical?: number;
+		filtered_gripper?: number;
     force_rate_command?: number;
     force_rate_newtons_per_second?: number;
     force_action_mode?: 'increase' | 'hold' | 'decrease' | 'release';
@@ -204,6 +207,16 @@ export interface WorkerState {
   done: boolean;
   outcome: string;
   latest_vertical_action?: number;
+	episode_policy_version?: number;
+	control?: {
+		dt: number;
+		carriage_x: number;
+		gripper_y: number;
+		velocity_x: number;
+		velocity_y: number;
+		error_x: number;
+		error_y: number;
+	};
   velocity_y?: number;
   target_grasp_y?: number;
   vertical_error?: number;

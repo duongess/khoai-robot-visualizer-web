@@ -115,6 +115,13 @@ func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
 	task := NewTask(1, DefaultConfig())
 	_, _ = task.Reset()
 	advanceToPhase(t, task, PhaseMoveToTarget)
+	// The previous lift command decelerates under the low-level controller;
+	// settle it before asserting horizontal delivery progress.
+	for step := 0; step < 10 && task.environment.state.GripperVelocityY > 0; step++ {
+		if _, err := task.Step(framework.Action{0, -1, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	progress, err := task.Step(framework.Action{1, 0, 0.5})
 	if err != nil || progress.Reward <= 0 {
 		t.Fatalf("delivery progress=%#v error=%v", progress, err)
@@ -371,13 +378,14 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 		t.Fatal(err)
 	}
-	if got, limit := task.environment.state.GripForce, 0.5*config.MaxGripForceRate*config.TimeStep; got != limit {
+	if got, limit := task.environment.state.GripForce, 0.5*config.ActionSmoothingAlpha*config.MaxGripForceRate*config.TimeStep; math.Abs(got-limit) > 1e-9 {
 		t.Fatalf("first grip-force increment = %v, want rate-limited %v", got, limit)
 	}
+	firstForce := task.environment.state.GripForce
 	if _, err := task.Step(framework.Action{0, 0, -0.5}); err != nil {
 		t.Fatal(err)
 	}
-	if task.environment.state.GripForce != 0 || !task.environment.state.Grip.GripperClosed {
+	if task.environment.state.GripForce >= firstForce || !task.environment.state.Grip.GripperClosed {
 		t.Fatalf("negative rate command did not reduce force while keeping the gripper closed: %#v", task.environment.state.Grip)
 	}
 	if _, err := task.Step(framework.Action{0, 0, -1}); err != nil {
@@ -385,6 +393,78 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	}
 	if task.environment.state.GripForce != 0 || task.environment.state.Grip.GripperClosed {
 		t.Fatalf("release command did not immediately open: %#v", task.environment.state.Grip)
+	}
+}
+
+func TestMotionFilteringDeadZoneAndAccelerationBounds(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = 3
+	config.InitialGripperY = 2
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+
+	still, err := task.Step(framework.Action{0.02, -0.02, 0.02})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.CarriageVelocityX != 0 || task.environment.state.GripperVelocityY != 0 || still.Info["filtered_action_horizontal"] != 0 {
+		t.Fatalf("dead-zone noise moved the gripper: state=%#v info=%#v", task.environment.state, still.Info)
+	}
+
+	forward, err := task.Step(framework.Action{1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxDelta := config.MaxHorizontalAcceleration * config.TimeStep
+	if got := task.environment.state.CarriageVelocityX; got <= 0 || got > maxDelta+1e-9 {
+		t.Fatalf("forward velocity %v exceeds acceleration bound %v", got, maxDelta)
+	}
+	if got := forward.Info["filtered_action_horizontal"]; math.Abs(float64(got)-config.ActionSmoothingAlpha) > 1e-6 {
+		t.Fatalf("filtered action = %v, want %v", got, config.ActionSmoothingAlpha)
+	}
+	previousVelocity := task.environment.state.CarriageVelocityX
+	reverse, err := task.Step(framework.Action{-1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta := math.Abs(task.environment.state.CarriageVelocityX - previousVelocity); delta > maxDelta+1e-9 {
+		t.Fatalf("reversal changed velocity by %v, limit %v", delta, maxDelta)
+	}
+	if task.environment.state.CarriageVelocityX < 0 {
+		t.Fatalf("velocity reversed in one step near target: previous=%v current=%v info=%#v", previousVelocity, task.environment.state.CarriageVelocityX, reverse.Info)
+	}
+	if got := reverse.Info["control_timestep"]; math.Abs(float64(got)-config.TimeStep) > 1e-6 {
+		t.Fatalf("telemetry timestep=%v, want fixed %v", got, config.TimeStep)
+	}
+}
+
+func TestAlternatingCommandsRemainVelocityBounded(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = 3
+	config.InitialGripperY = 2
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	previousVelocity := task.environment.state.CarriageVelocityX
+	for step := 0; step < 20; step++ {
+		action := float32(1)
+		if step%2 == 1 {
+			action = -1
+		}
+		if _, err := task.Step(framework.Action{action, 0, 0}); err != nil {
+			t.Fatal(err)
+		}
+		velocity := task.environment.state.CarriageVelocityX
+		if math.Abs(velocity) > config.MaxHorizontalSpeed+1e-9 {
+			t.Fatalf("step %d velocity %v exceeds maximum %v", step, velocity, config.MaxHorizontalSpeed)
+		}
+		if delta := math.Abs(velocity - previousVelocity); delta > config.MaxHorizontalAcceleration*config.TimeStep+1e-9 {
+			t.Fatalf("step %d oscillation changed velocity by %v", step, delta)
+		}
+		previousVelocity = velocity
 	}
 }
 

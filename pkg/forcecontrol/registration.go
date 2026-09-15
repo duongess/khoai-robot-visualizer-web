@@ -40,8 +40,8 @@ func validateRegistration(runtime *framework.Runtime, config Config) error {
 	if runtime == nil {
 		return errors.New("runtime is required")
 	}
-	if config.MaxGripForce <= 0 || config.MaxGripForceRate <= 0 || config.MaxHorizontalSpeed <= 0 || config.MaxVerticalSpeed <= 0 || config.TimeStep <= 0 || config.MaxEpisodeSteps <= 0 {
-		return errors.New("force-control configuration must define positive speeds, grip force, time step, and episode length")
+	if config.MaxGripForce <= 0 || config.MaxGripForceRate <= 0 || config.MaxHorizontalSpeed <= 0 || config.MaxVerticalSpeed <= 0 || config.MaxHorizontalAcceleration <= 0 || config.MaxVerticalAcceleration <= 0 || config.ActionSmoothingAlpha <= 0 || config.ActionSmoothingAlpha > 1 || config.TimeStep <= 0 || config.MaxEpisodeSteps <= 0 {
+		return errors.New("force-control configuration must define positive bounded motion, grip force, fixed time step, and episode length")
 	}
 	if config.ObjectWidth <= 0 || config.ObjectHeight <= 0 || config.TargetWidth <= 0 || config.ObjectFriction <= 0 || config.ObjectBreakForce <= 0 || config.HorizontalTolerance <= 0 || config.VerticalTolerance <= 0 || config.GraspHorizontalTolerance <= 0 || config.GraspVerticalTolerance <= 0 || config.ClosedOpeningThreshold < 0 || config.ClosedOpeningThreshold > 1 || config.ReleaseActionThreshold < -1 || config.ReleaseActionThreshold >= 0 || config.StableVelocityThreshold < 0 || config.StablePlacementSteps <= 0 || config.LiftClearance < 0 || config.ReleaseTolerance <= 0 {
 		return errors.New("force-control configuration contains invalid object, target, or phase tolerances")

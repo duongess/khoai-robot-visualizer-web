@@ -31,7 +31,7 @@ requires a released object to settle inside the target zone for the configured
 number of steps. Telemetry exposes contact, attachment, object state, and each
 reward component for diagnosis.
 
-The coordinate/action/reward schema is version 3. This learner currently has no
+The coordinate/action/reward schema is version 7. This learner currently has no
 checkpoint-loading path. Any future loader must call
 `forcecontrol.ValidateCheckpointSchema`; earlier policies and replay data must
 be discarded because they may contain exploitable reward transitions.
@@ -51,6 +51,13 @@ Start the learner in one terminal:
 cd khoai-robot-control-framework
 poetry run python -m ai
 ```
+
+The dashboard is a training collector and therefore samples SAC actions for
+exploration. For a stable evaluation-only run, set
+`LEARNER_DETERMINISTIC_INFERENCE=true` before starting the learner; it uses the
+actor's deterministic mean action. Every episode pins the learner policy
+version returned at its first inference, so later training updates cannot alter
+that episode.
 
 Start the dashboard backend in another terminal:
 

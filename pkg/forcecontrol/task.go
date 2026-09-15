@@ -50,6 +50,19 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 	}
 	state, breakdown := t.environment.state, t.environment.lastReward
 	info := map[string]float32{
+		"raw_action_horizontal":      actionValue(action, 0),
+		"raw_action_vertical":        actionValue(action, 1),
+		"raw_action_gripper":         actionValue(action, 2),
+		"filtered_action_horizontal": float32(t.environment.filteredAction[0]),
+		"filtered_action_vertical":   float32(t.environment.filteredAction[1]),
+		"filtered_action_gripper":    float32(t.environment.filteredAction[2]),
+		"control_timestep":           float32(t.config.TimeStep),
+		"carriage_x":                 float32(state.CarriageX),
+		"gripper_y":                  float32(state.GripperY),
+		"carriage_velocity_x":        float32(state.CarriageVelocityX),
+		"gripper_velocity_y":         float32(state.GripperVelocityY),
+		"gripper_to_object_error_x":  float32(state.ObjectX - state.CarriageX),
+		"gripper_to_object_error_y":  float32(t.environment.objectGripHeightFor(state) - state.GripperY),
 		"boundary_hit":               float32(boolToFloat(state.BoundaryHit)),
 		"coordinate_system_version":  CoordinateSystemVersion,
 		"gripper_closed":             float32(boolToFloat(state.Grip.GripperClosed)),
@@ -70,6 +83,13 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"total_step_reward":          float32(breakdown.Total),
 	}
 	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done, Info: info}, nil
+}
+
+func actionValue(action framework.Action, index int) float32 {
+	if index >= len(action) {
+		return 0
+	}
+	return action[index]
 }
 
 func boolToFloat(value bool) float64 {

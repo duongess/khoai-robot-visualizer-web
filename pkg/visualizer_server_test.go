@@ -17,12 +17,15 @@ type apiTestLearner struct{}
 func (apiTestLearner) HealthCheck(context.Context) (framework.HealthStatus, error) {
 	return framework.HealthStatus{Ready: true}, nil
 }
-func (apiTestLearner) PredictBatch(_ context.Context, states []framework.State) (framework.PredictionResult, error) {
+func (apiTestLearner) PredictBatch(_ context.Context, states []framework.State, policyVersion uint64) (framework.PredictionResult, error) {
 	actions := make([]framework.Action, len(states))
 	for i := range actions {
 		actions[i] = framework.Action{0, 0, -1}
 	}
-	return framework.PredictionResult{Actions: actions}, nil
+	if policyVersion == 0 {
+		policyVersion = 1
+	}
+	return framework.PredictionResult{Actions: actions, PolicyVersion: policyVersion}, nil
 }
 func (apiTestLearner) TrainBatch(context.Context, []framework.Transition) (framework.TrainingResult, error) {
 	return framework.TrainingResult{}, nil

@@ -68,9 +68,9 @@ export const WorkerInspection: React.FC = () => {
         </div>
 
         <div className="bg-slate-950/70 border border-slate-800/80 p-2 rounded">
-          <span className="text-[10px] text-slate-400 block">Last Action</span>
+          <span className="text-[10px] text-slate-400 block">Raw → Filtered Force</span>
           <span className="font-bold text-purple-300">
-            dF/dt: {worker?.last_action.force_rate_command ?? worker?.last_action.normalized_grip_force ?? 0}
+            {worker?.last_action.force_rate_command?.toFixed(3) ?? worker?.last_action.normalized_grip_force ?? 0} → {worker?.last_action.filtered_gripper?.toFixed(3) ?? 0}
           </span>
         </div>
 
@@ -92,8 +92,8 @@ export const WorkerInspection: React.FC = () => {
         </div>
 
         <div className="bg-slate-950/70 border border-slate-800/80 p-2 rounded">
-          <span className="text-[10px] text-slate-400 block">Policy Version</span>
-          <span className="font-bold text-cyan-300">v{runtime?.policy_version ?? 184}</span>
+          <span className="text-[10px] text-slate-400 block">Episode Policy</span>
+          <span className="font-bold text-cyan-300">v{worker?.episode_policy_version ?? runtime?.policy_version ?? 0}</span>
         </div>
       </div>
     </div>

@@ -750,11 +750,11 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if _, err := align.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if align.environment.state.Phase != PhaseApproachObject {
-		t.Fatalf("align curriculum did not initialize the real approach state: %#v", align.environment.state)
+	if align.environment.state.Phase != PhaseLowerToObject || align.environment.state.CarriageX != align.environment.state.ObjectX || align.environment.state.GripperY <= align.environment.objectGripHeight() {
+		t.Fatalf("align curriculum did not initialize just above a reachable grasp guide: %#v", align.environment.state)
 	}
-	// The policy, rather than the curriculum, must command the remaining
-	// physical descent before valid stable contact can finish the stage.
+	// The policy, rather than the curriculum, must command the remaining short
+	// physical descent before real contact can finish the lesson.
 	for step := 0; step < 20 && align.environment.state.Phase != PhaseSuccess; step++ {
 		if _, err := align.Step(framework.Action{0, -1, 0}); err != nil {
 			t.Fatal(err)

@@ -23,10 +23,10 @@ type CurriculumStage string
 const (
 	// CurriculumAutomatic progresses a worker through the stages after verified
 	// successes without restarting the learner or replacing policy weights.
-	CurriculumAutomatic            CurriculumStage = "auto"
-	CurriculumAlignAndContact      CurriculumStage = "align-and-contact"
-	CurriculumGrasp                CurriculumStage = "grasp"
-	CurriculumLift                 CurriculumStage = "lift"
+	CurriculumAutomatic           CurriculumStage = "auto"
+	CurriculumAlignAndContact     CurriculumStage = "align-and-contact"
+	CurriculumGrasp               CurriculumStage = "grasp"
+	CurriculumLift                CurriculumStage = "lift"
 	CurriculumTransportAndRelease CurriculumStage = "transport-and-release"
 	CurriculumFullPickAndPlace    CurriculumStage = "full-pick-and-place"
 	// Legacy values remain accepted so an existing local launch configuration
@@ -57,8 +57,11 @@ func (stage CurriculumStage) canonical() CurriculumStage {
 
 // CurriculumConfig contains only task-distribution and verification settings.
 type CurriculumConfig struct {
-	Stage              CurriculumStage
-	ContactStableSteps int
+	Stage CurriculumStage
+	// ContactStartHeightOffset places the novice contact lesson just above the
+	// physical grasp guide. It changes only reset distribution, never actions.
+	ContactStartHeightOffset float64
+	ContactStableSteps       int
 	// EpisodeStepLimit applies only to a non-full curriculum stage when
 	// positive. Shorter stages must reset frequently enough to sample their
 	// narrow initial distribution instead of spending a full task horizon away
@@ -234,8 +237,12 @@ func DefaultConfig() Config {
 			BreakEnergyLoss:               0.20,
 		},
 		Curriculum: CurriculumConfig{
-			Stage:              CurriculumFullPickAndPlace,
-			ContactStableSteps: 3,
+			Stage:                    CurriculumFullPickAndPlace,
+			ContactStartHeightOffset: 0.30,
+			// The contact lesson is intentionally a contact lesson: a single real
+			// contact frame passes it. Later grasp/transport stages retain their
+			// respective attachment and stability requirements.
+			ContactStableSteps: 1,
 			EpisodeStepLimit:   96,
 		},
 		Reward: RewardConfig{
@@ -260,15 +267,15 @@ func DefaultConfig() Config {
 			EmptyGripStepPenalty:         -0.01,
 			// Empty-space force is not a grasp. A bounded ongoing cost makes
 			// building force to the material limit before contact unattractive.
-			DetachedExcessForcePenalty:   -0.50,
-			InactivityPenalty:            -0.005,
-			EmptyTargetPenalty:           -2.0,
-			DroppedObjectPenalty:         -10.0,
-			BoundaryCollisionPenalty:     -0.25,
+			DetachedExcessForcePenalty: -0.50,
+			InactivityPenalty:          -0.005,
+			EmptyTargetPenalty:         -2.0,
+			DroppedObjectPenalty:       -10.0,
+			BoundaryCollisionPenalty:   -0.25,
 			// Descending toward the physical grasp guide needs a denser signal
 			// than a distant terminal placement reward. This is still signed
 			// progress, so upward/away motion is penalized symmetrically.
-			LowerProgressScale:           3.0,
+			LowerProgressScale: 3.0,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},
 	}

@@ -47,8 +47,8 @@ func validateRegistration(runtime *framework.Runtime, config Config) error {
 	if config.ObjectWidth <= 0 || config.ObjectHeight <= 0 || config.TargetWidth <= 0 || config.ObjectFriction <= 0 || config.ObjectBreakForce <= 0 || config.GripDetachInvalidFrames <= 0 || config.SlipDetachFrames <= 0 || config.HorizontalTolerance <= 0 || config.VerticalTolerance <= 0 || config.GraspHorizontalTolerance <= 0 || config.GraspVerticalTolerance <= 0 || config.ClosedOpeningThreshold < 0 || config.ClosedOpeningThreshold > 1 || config.ReleaseActionThreshold < -1 || config.ReleaseActionThreshold >= 0 || config.StableVelocityThreshold < 0 || config.StablePlacementSteps <= 0 || config.LiftClearance < 0 || config.ReleaseTolerance <= 0 || config.ActionDeadZone < 0 || config.ActionDeadZone >= 1 {
 		return errors.New("force-control configuration contains invalid object, target, or phase tolerances")
 	}
-	if !config.Curriculum.Stage.Valid() || config.Curriculum.ContactStableSteps <= 0 || config.Curriculum.EpisodeStepLimit < 0 {
-		return errors.New("force-control curriculum must select a known stage with positive stable-contact steps and non-negative episode limit")
+	if !config.Curriculum.Stage.Valid() || config.Curriculum.ContactStartHeightOffset < 0 || config.Curriculum.ContactStableSteps <= 0 || config.Curriculum.EpisodeStepLimit < 0 {
+		return errors.New("force-control curriculum must select a known stage with non-negative contact offset, positive stable-contact steps, and non-negative episode limit")
 	}
 	if config.ObjectBreakForce > config.MaxGripForce {
 		return errors.New("force-control configuration has no safe closed-grip force interval")

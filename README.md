@@ -92,6 +92,12 @@ All stages retain the same continuous action contract: horizontal, vertical
 only reset distributions and verified terminal conditions; they do not issue
 robot actions for the policy.
 
+`align-and-contact` starts horizontally aligned and `0.30 m` above the
+reachable grasp guide by default. One real contact frame completes that novice
+lesson; the actor must still issue the negative vertical command. Configure
+`Curriculum.ContactStartHeightOffset` and `ContactStableSteps` when changing
+its difficulty.
+
 Open `http://127.0.0.1:8080`. The browser connects only to the Go process through `/api/*` and `/ws`; it never connects to Python directly.
 
 For frontend hot reload, run Vite separately:

@@ -263,10 +263,15 @@ func (e *Environment) reset() State {
 func (e *Environment) applyCurriculumReset() {
 	switch e.currentCurriculumStage() {
 	case CurriculumAlignAndContact:
-		// Preserve the configured world position so this stage can learn both
-		// lateral alignment and descent. DefaultConfig begins aligned, while a
-		// task author may randomize the initial carriage position.
-		e.state.Phase = PhaseApproachObject
+		// This first lesson deliberately isolates the final downward approach.
+		// Starting 2.8 m above the object made a supposedly simple contact task
+		// indistinguishable from a full pick-and-place episode under exploration.
+		// It is still the policy that commands the descent; reset merely selects a
+		// reachable initial state close to the grasp guide.
+		e.state.CarriageX = e.state.ObjectX
+		bounds := SafeGripperBounds(e.config, e.state.CarriageX)
+		e.state.GripperY = clamp(e.objectGripHeight()+e.config.Curriculum.ContactStartHeightOffset, bounds.MinY, bounds.MaxY)
+		e.state.Phase = PhaseLowerToObject
 	case CurriculumGrasp:
 		e.state.CarriageX = e.state.ObjectX
 		e.state.GripperY = e.objectGripHeight()

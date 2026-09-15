@@ -70,7 +70,7 @@ export const WorkerInspection: React.FC = () => {
         <div className="bg-slate-950/70 border border-slate-800/80 p-2 rounded">
           <span className="text-[10px] text-slate-400 block">Last Action</span>
           <span className="font-bold text-purple-300">
-            F_norm: {worker?.last_action.normalized_grip_force ?? 0.782}
+            dF/dt: {worker?.last_action.force_rate_command ?? worker?.last_action.normalized_grip_force ?? 0}
           </span>
         </div>
 

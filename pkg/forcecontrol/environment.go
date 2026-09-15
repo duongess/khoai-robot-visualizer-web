@@ -12,7 +12,7 @@ const ObservationDimension = 21
 
 // CoordinateSystemVersion changes whenever action meaning or observation
 // normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 5
+const CoordinateSystemVersion = 6
 
 const (
 	observationGripperX = iota
@@ -152,6 +152,7 @@ type Environment struct {
 	successRewardAwarded           bool
 	failureReason                  string
 	lastReward                     RewardBreakdown
+	lastGripRateAction             float64
 }
 
 func newEnvironment(seed int64, config Config) *Environment {
@@ -182,6 +183,7 @@ func (e *Environment) reset() State {
 	e.successRewardAwarded = false
 	e.failureReason = ""
 	e.lastReward = RewardBreakdown{}
+	e.lastGripRateAction = 0
 	e.ready = true
 	return e.state
 }
@@ -199,10 +201,12 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	}
 
 	previous := e.state
+	previousGripRateAction := e.lastGripRateAction
 	e.state.BoundaryHit = false
 	e.applyHorizontalControl(values[0])
 	e.applyVerticalControl(values[1])
 	e.applyGripControl(values[2])
+	e.lastGripRateAction = values[2]
 	e.updateGripState()
 	if e.state.Grip.ObjectAttached {
 		e.wasEverGrasped = true
@@ -220,14 +224,14 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	terminalReason := e.detectFailure(previous)
 	if terminalReason != "" {
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
-		e.lastReward = e.reward(previous)
+		e.lastReward = e.reward(previous, values[2], previousGripRateAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
 		e.lastReward.Total += e.failurePenalty(terminalReason)
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
 	}
 	e.updatePhase(previous)
 	if e.state.Phase == PhaseSuccess {
-		e.lastReward = e.reward(previous)
+		e.lastReward = e.reward(previous, values[2], previousGripRateAction)
 		if !e.successRewardAwarded {
 			e.lastReward.Success = e.config.Reward.SuccessfulPlacement
 			e.lastReward.Total += e.lastReward.Success
@@ -235,7 +239,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
-	e.lastReward = e.reward(previous)
+	e.lastReward = e.reward(previous, values[2], previousGripRateAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
 }
 
@@ -279,17 +283,17 @@ func (e *Environment) applyVerticalControl(value float64) {
 }
 
 func (e *Environment) applyGripControl(value float64) {
-	e.state.GripperOpening = clamp((1-value)/2, 0, 1)
-	// Opening is a deliberate, immediate release. Closing approaches the
-	// requested force at a bounded physical rate, preventing noisy policy
-	// outputs from jumping directly from zero to the break threshold.
-	if e.state.GripperOpening > e.config.ClosedOpeningThreshold {
+	// action[2] is a signed force-rate request. Only the explicit release band
+	// opens the jaws; a small negative command means "back off a little", not
+	// "drop the object". This preserves the feedback-control problem for SAC.
+	if value <= e.config.ReleaseActionThreshold {
+		e.state.GripperOpening = 1
 		e.state.GripForce = 0
 		return
 	}
-	targetForce := clamp((value+1)/2*e.config.MaxGripForce, 0, e.config.MaxGripForce)
-	maximumDelta := e.config.MaxGripForceRate * e.config.TimeStep
-	e.state.GripForce += clamp(targetForce-e.state.GripForce, -maximumDelta, maximumDelta)
+	e.state.GripperOpening = 0
+	deltaForce := value * e.config.MaxGripForceRate * e.config.TimeStep
+	e.state.GripForce = clamp(e.state.GripForce+deltaForce, 0, e.config.MaxGripForce)
 }
 
 func (e *Environment) updateGripState() {
@@ -416,7 +420,7 @@ func (e *Environment) updatePhase(previous State) {
 	}
 }
 
-func (e *Environment) reward(previous State) RewardBreakdown {
+func (e *Environment) reward(previous State, gripRateAction, previousGripRateAction float64) RewardBreakdown {
 	breakdown := RewardBreakdown{Penalty: e.config.Reward.TimePenalty}
 	attached := e.state.Grip.ObjectAttached
 	if previous.Phase == PhaseApproachObject && !attached {
@@ -438,6 +442,12 @@ func (e *Environment) reward(previous State) RewardBreakdown {
 	// It is measured from object-to-target distance, never gripper-to-target.
 	if previous.Phase == PhaseMoveToTarget && previous.Grip.ObjectAttached && attached {
 		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * (targetDistance(previous) - targetDistance(e.state))
+	}
+	if previous.Grip.ObjectAttached && attached && previous.Phase != PhaseReleaseObject {
+		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(gripRateAction-previousGripRateAction)
+		if e.state.Grip.ForceValid && math.Abs(gripRateAction) <= e.config.ActionDeadZone {
+			breakdown.Grip += e.config.Reward.AttachedForceStabilityReward
+		}
 	}
 	if e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected && !e.invalidGripPenaltyAwarded {
 		breakdown.Penalty += e.config.Reward.InvalidGripPenalty

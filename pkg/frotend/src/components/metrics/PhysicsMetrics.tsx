@@ -47,6 +47,9 @@ export const PhysicsMetrics: React.FC = () => {
   const requiredGripForce = obj?.required_grip_force ?? 7.15;
   const breakForce = obj?.break_force ?? draftConfig.object.break_force;
   const safetyMargin = currentGripForce - requiredGripForce;
+	const forceRateCommand = worker?.last_action.force_rate_command ?? 0;
+	const forceRateNewtonPerSecond = worker?.last_action.force_rate_newtons_per_second ?? 0;
+	const forceActionMode = worker?.last_action.force_action_mode ?? 'hold';
   const mass = obj?.mass ?? draftConfig.object.mass;
   const friction = obj?.friction ?? draftConfig.object.friction;
   const objectStatus = obj?.status ?? 'idle';
@@ -119,6 +122,15 @@ export const PhysicsMetrics: React.FC = () => {
 
         {/* Object & Gantry State Grid */}
         <div className="grid grid-cols-2 gap-2 font-mono text-[11px]">
+		  <div className="bg-slate-950/60 border border-slate-800/80 p-2 rounded">
+			<div className="text-[10px] text-slate-400">Force-Rate Command</div>
+			<div className="text-sm font-bold text-violet-300 mt-0.5">
+			  {forceRateNewtonPerSecond >= 0 ? '+' : ''}{forceRateNewtonPerSecond.toFixed(2)} N/s
+			</div>
+			<div className="text-[9px] uppercase text-slate-500 mt-0.5">
+			  {forceActionMode} ({forceRateCommand.toFixed(3)})
+			</div>
+		  </div>
           <div className="bg-slate-950/60 border border-slate-800/80 p-2 rounded">
             <div className="text-[10px] text-slate-400">Object State</div>
             <div className="font-bold text-slate-100 uppercase tracking-wide mt-0.5">

@@ -80,7 +80,7 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	_, _ = task.Reset()
 	var grip framework.StepResult
 	var err error
-	for step := 0; step < 10 && !task.environment.state.ObjectGrasped; step++ {
+	for step := 0; step < 30 && !task.environment.state.ObjectGrasped; step++ {
 		grip, err = task.Step(framework.Action{0, 0, 0.5})
 		if err != nil {
 			t.Fatal(err)
@@ -100,7 +100,7 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	broken := NewTask(1, config)
 	_, _ = broken.Reset()
 	var result framework.StepResult
-	for step := 0; step < 10 && !result.Done; step++ {
+	for step := 0; step < 30 && !result.Done; step++ {
 		result, err = broken.Step(framework.Action{0, 0, 1})
 		if err != nil {
 			t.Fatal(err)
@@ -371,14 +371,20 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 		t.Fatal(err)
 	}
-	if got, limit := task.environment.state.GripForce, config.MaxGripForceRate*config.TimeStep; got != limit {
+	if got, limit := task.environment.state.GripForce, 0.5*config.MaxGripForceRate*config.TimeStep; got != limit {
 		t.Fatalf("first grip-force increment = %v, want rate-limited %v", got, limit)
+	}
+	if _, err := task.Step(framework.Action{0, 0, -0.5}); err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.GripForce != 0 || !task.environment.state.Grip.GripperClosed {
+		t.Fatalf("negative rate command did not reduce force while keeping the gripper closed: %#v", task.environment.state.Grip)
 	}
 	if _, err := task.Step(framework.Action{0, 0, -1}); err != nil {
 		t.Fatal(err)
 	}
 	if task.environment.state.GripForce != 0 || task.environment.state.Grip.GripperClosed {
-		t.Fatalf("open command did not immediately release: %#v", task.environment.state.Grip)
+		t.Fatalf("release command did not immediately open: %#v", task.environment.state.Grip)
 	}
 }
 
@@ -440,7 +446,7 @@ func attachedTask(t *testing.T, config Config) *Task {
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	for step := 0; step < 10 && !task.environment.state.Grip.ObjectAttached; step++ {
+	for step := 0; step < 30 && !task.environment.state.Grip.ObjectAttached; step++ {
 		if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 			t.Fatalf("could not establish valid attachment: state=%#v err=%v", task.environment.state.Grip, err)
 		}
@@ -465,7 +471,7 @@ func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
 	t.Helper()
 	for step := 0; step < 200 && task.environment.state.Phase != wanted; step++ {
 		phase := task.environment.state.Phase
-		action := framework.Action{0, 0, 0.5}
+		action := framework.Action{0, 0, 0}
 		switch phase {
 		case PhaseApproachObject:
 			action = framework.Action{0, 0, -1}
@@ -474,11 +480,11 @@ func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
 		case PhaseGripObject:
 			action = framework.Action{0, 0, 0.5}
 		case PhaseLiftObject:
-			action = framework.Action{0, 1, 0.5}
+			action = framework.Action{0, 1, 0}
 		case PhaseMoveToTarget:
-			action = framework.Action{1, 0, 0.5}
+			action = framework.Action{1, 0, 0}
 		case PhaseLowerAtTarget:
-			action = framework.Action{0, -1, 0.5}
+			action = framework.Action{0, -1, 0}
 		default:
 			t.Fatalf("cannot advance from phase %s", phase)
 		}

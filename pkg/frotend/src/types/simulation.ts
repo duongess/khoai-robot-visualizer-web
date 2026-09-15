@@ -193,6 +193,9 @@ export interface WorkerState {
   };
   last_action: {
     normalized_grip_force: number;
+    force_rate_command?: number;
+    force_rate_newtons_per_second?: number;
+    force_action_mode?: 'increase' | 'hold' | 'decrease' | 'release';
   };
   last_reward: number;
   cumulative_reward?: number;

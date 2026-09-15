@@ -743,35 +743,45 @@ func TestDeadZoneReportsSuppressedCommandsAndKeepsCommandsAboveThreshold(t *test
 }
 
 func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
-	lowerConfig := DefaultConfig()
-	lowerConfig.Curriculum.Stage = CurriculumLowerAndContact
-	lowerConfig.Curriculum.ContactStableSteps = 1
-	lower := NewTask(1, lowerConfig)
-	if _, err := lower.Reset(); err != nil {
+	alignConfig := DefaultConfig()
+	alignConfig.Curriculum.Stage = CurriculumAlignAndContact
+	alignConfig.Curriculum.ContactStableSteps = 1
+	align := NewTask(1, alignConfig)
+	if _, err := align.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if lower.environment.state.Phase != PhaseLowerToObject || lower.environment.state.CarriageX != lower.environment.state.ObjectX {
-		t.Fatalf("lower curriculum did not initialize above object: %#v", lower.environment.state)
+	if align.environment.state.Phase != PhaseApproachObject {
+		t.Fatalf("align curriculum did not initialize the real approach state: %#v", align.environment.state)
 	}
 	// The policy, rather than the curriculum, must command the remaining
 	// physical descent before valid stable contact can finish the stage.
-	for step := 0; step < 20 && lower.environment.state.Phase != PhaseSuccess; step++ {
-		if _, err := lower.Step(framework.Action{0, -1, 0}); err != nil {
+	for step := 0; step < 20 && align.environment.state.Phase != PhaseSuccess; step++ {
+		if _, err := align.Step(framework.Action{0, -1, 0}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if lower.environment.state.Phase != PhaseSuccess {
-		t.Fatalf("lower curriculum did not accept stable physical contact: %#v", lower.environment.state)
+	if align.environment.state.Phase != PhaseSuccess {
+		t.Fatalf("align curriculum did not accept stable physical contact: %#v", align.environment.state)
+	}
+
+	graspConfig := DefaultConfig()
+	graspConfig.Curriculum.Stage = CurriculumGrasp
+	grasp := NewTask(1, graspConfig)
+	if _, err := grasp.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if grasp.environment.state.Phase != PhaseGripObject || grasp.environment.state.Grip.ObjectAttached {
+		t.Fatalf("grasp curriculum must still require a learned attachment: %#v", grasp.environment.state)
 	}
 
 	liftConfig := DefaultConfig()
-	liftConfig.Curriculum.Stage = CurriculumGraspAndLift
+	liftConfig.Curriculum.Stage = CurriculumLift
 	lift := NewTask(1, liftConfig)
 	if _, err := lift.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if lift.environment.state.Phase != PhaseGripObject || lift.environment.state.Grip.ObjectAttached {
-		t.Fatalf("grasp curriculum must still require a learned attachment: %#v", lift.environment.state)
+	if lift.environment.state.Phase != PhaseLiftObject || !lift.environment.state.Grip.ObjectAttached || !lift.environment.state.Grip.ForceValid {
+		t.Fatalf("lift curriculum did not initialize a physical attachment: %#v", lift.environment.state)
 	}
 
 	transportConfig := DefaultConfig()
@@ -783,6 +793,65 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if transport.environment.state.Phase != PhaseMoveToTarget || !transport.environment.state.Grip.ObjectAttached || !transport.environment.state.Grip.ForceValid {
 		t.Fatalf("transport curriculum did not initialize a physical carried object: %#v", transport.environment.state)
 	}
+}
+
+func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAutomatic
+	config.Curriculum.ContactStableSteps = 1
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := task.environment.currentCurriculumStage(); got != CurriculumAlignAndContact {
+		t.Fatalf("automatic curriculum began at %q, want %q", got, CurriculumAlignAndContact)
+	}
+
+	for step := 0; step < 20 && task.environment.state.Phase != PhaseSuccess; step++ {
+		if _, err := task.Step(framework.Action{0, -1, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if task.environment.state.Phase != PhaseSuccess {
+		t.Fatalf("automatic first lesson did not require verified physical contact: %#v", task.environment.state)
+	}
+	// The terminal state stays attributable to the completed lesson until the
+	// runtime resets the episode. That reset begins the next lesson.
+	if got := task.environment.currentCurriculumStage(); got != CurriculumAlignAndContact {
+		t.Fatalf("curriculum advanced before reset: got %q", got)
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := task.environment.currentCurriculumStage(); got != CurriculumGrasp {
+		t.Fatalf("automatic curriculum did not advance after success: got %q, want %q", got, CurriculumGrasp)
+	}
+	if task.environment.state.Phase != PhaseGripObject || task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("grasp lesson must still require a policy-controlled attachment: %#v", task.environment.state)
+	}
+}
+
+func TestDetachedExcessForceIsPenalizedWithoutBecomingAGrasp(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = 3
+	config.InitialGripperY = 2
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	for step := 0; step < 20; step++ {
+		result, err := task.Step(framework.Action{0, 0, 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.environment.state.GripForce > task.environment.requiredForce() {
+			if task.environment.state.Grip.ObjectAttached || result.Info["detached_force_penalty"] >= 0 {
+				t.Fatalf("empty-space excess force was not penalized safely: state=%#v info=%#v", task.environment.state, result.Info)
+			}
+			return
+		}
+	}
+	t.Fatal("test did not build force above the detached threshold")
 }
 
 func TestAlternatingCommandsRemainVelocityBounded(t *testing.T) {

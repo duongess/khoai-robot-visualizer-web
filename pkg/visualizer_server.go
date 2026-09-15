@@ -199,7 +199,7 @@ func (s *APIServer) sceneConfig() map[string]any {
 		points[i] = terrainPoint{ID: "terrain-" + string(rune('1'+i)), X: point.X, Y: point.Y}
 	}
 	bounds := forcecontrol.SafeGripperBounds(config, config.InitialCarriageX)
-	return map[string]any{"workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "object": map[string]any{"id": "object-1", "position_x": config.InitialObjectX, "position_y": terrainAt(config, config.InitialObjectX) + config.ObjectHeight/2, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": config.ObjectBreakForce, "initial_vertical_velocity": 0, "width": config.ObjectWidth, "height": config.ObjectHeight}, "gantry": map[string]any{"rail_y": config.RailY, "carriage_x": config.InitialCarriageX, "gripper_y": config.InitialGripperY, "min_x": bounds.MinX, "max_x": bounds.MaxX, "min_y": bounds.MinY, "max_y": bounds.MaxY, "initial_grip_force": 0, "minimum_grip_force": 0, "maximum_grip_force": config.MaxGripForce}, "terrain": map[string]any{"points": points, "ground_friction": config.ObjectFriction, "gravity": config.Gravity}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}}
+	return map[string]any{"workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "object": map[string]any{"id": "object-1", "position_x": config.InitialObjectX, "position_y": terrainAt(config, config.InitialObjectX) + config.ObjectHeight/2, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": config.ObjectBreakForce, "initial_vertical_velocity": 0, "width": config.ObjectWidth, "height": config.ObjectHeight}, "gantry": map[string]any{"rail_y": config.RailY, "carriage_x": config.InitialCarriageX, "gripper_y": config.InitialGripperY, "min_x": bounds.MinX, "max_x": bounds.MaxX, "min_y": bounds.MinY, "max_y": bounds.MaxY, "initial_grip_force": 0, "minimum_grip_force": 0, "maximum_grip_force": config.MaxGripForce}, "terrain": map[string]any{"points": points, "ground_friction": config.ObjectFriction, "gravity": config.Gravity}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}, "curriculum": map[string]any{"stage": config.Curriculum.Stage, "contact_stable_steps": config.Curriculum.ContactStableSteps, "episode_step_limit": config.Curriculum.EpisodeStepLimit}}
 }
 
 func (s *APIServer) telemetry() map[string]any {
@@ -249,7 +249,7 @@ func (s *APIServer) telemetry() map[string]any {
 		energyEvent := energyEventLabel(selected.Info["energy_event_code"])
 		worker = map[string]any{
 			"id": selected.ID, "episode_id": selected.EpisodeID, "episode_step": selected.EpisodeStep, "episode_policy_version": selected.PolicyVersion,
-			"action_source": selected.ActionSource, "curriculum_stage": string(config.Curriculum.Stage),
+			"action_source": selected.ActionSource, "curriculum_stage": curriculumStageLabel(selected.Info["curriculum_stage_code"]),
 			"task_phase": phase.String(), "gripper_state": ternary(gripperClosed, "closed", "open"), "contact_state": ternary(contactDetected, "contact", "none"),
 			"force_valid":     selected.Info["force_valid"] > 0,
 			"gantry":          map[string]any{"carriage_x": carriageX, "gripper_y": gripperY, "grip_force": gripForce, "jaw_opening": 1 - (get(14)+1)/2, "rail_y": config.RailY},
@@ -264,10 +264,10 @@ func (s *APIServer) telemetry() map[string]any {
 			"last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": selected.Info["gripper_to_object_distance"], "distance_to_target": selected.Info["object_to_target_distance"],
 			"contact_detected": contactDetected, "object_attached": objectAttached, "object_stable": selected.Info["object_stable"] > 0, "slipping": selected.Info["slipping"] > 0,
 			"homeostasis":     map[string]any{"energy": selected.Info["energy"], "delta": selected.Info["energy_delta"], "decay": selected.Info["energy_decay"], "food_gain": selected.Info["energy_food_gain"], "reward": selected.Info["homeostasis_reward"], "event": energyEvent},
-			"approach_reward": selected.Info["approach_reward"], "grip_reward": selected.Info["grip_reward"], "delivery_reward": selected.Info["delivery_reward"], "success_reward": selected.Info["success_reward"], "penalty_reward": selected.Info["penalty_reward"], "total_step_reward": selected.Info["total_step_reward"], "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome,
+			"approach_reward": selected.Info["approach_reward"], "grip_reward": selected.Info["grip_reward"], "lift_reward": selected.Info["lift_reward"], "delivery_reward": selected.Info["delivery_reward"], "success_reward": selected.Info["success_reward"], "detached_force_penalty": selected.Info["detached_force_penalty"], "penalty_reward": selected.Info["penalty_reward"], "total_step_reward": selected.Info["total_step_reward"], "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome,
 		}
 	}
-	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": snapshot.StepsPerSecond, "episodes_per_second": snapshot.EpisodesPerSecond, "total_steps": snapshot.TotalSteps, "total_episodes": snapshot.TotalEpisodes, "success_rate": snapshot.SuccessRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy, "critic_one_q": snapshot.CriticOneQ, "critic_two_q": snapshot.CriticTwoQ, "alpha": snapshot.Alpha, "actor_log_std": []float32{snapshot.ActorLogStdHorizontal, snapshot.ActorLogStdVertical, snapshot.ActorLogStdGripper}, "action_statistics": snapshot.ActionStatistics, "phase_occupancy": snapshot.PhaseOccupancy, "failure_reasons": snapshot.FailureReasons, "last_error": snapshot.LastError}, "worker": worker}
+	return map[string]any{"type": "simulation_snapshot", "timestamp": time.Now().UTC().Format(time.RFC3339Nano), "runtime": map[string]any{"status": snapshot.Status, "mode": "swarm", "active_workers": snapshot.ActiveWorkers, "steps_per_second": snapshot.StepsPerSecond, "episodes_per_second": snapshot.EpisodesPerSecond, "total_steps": snapshot.TotalSteps, "total_episodes": snapshot.TotalEpisodes, "success_rate": snapshot.SuccessRate, "contact_rate": snapshot.ContactRate, "attachment_rate": snapshot.AttachmentRate, "average_reward": snapshot.AverageReward, "replay_buffer_size": snapshot.ReplayBufferSize, "training_batches": snapshot.TrainingBatches, "policy_version": snapshot.PolicyVersion, "training_step": snapshot.TrainingStep, "actor_loss": snapshot.ActorLoss, "critic_loss": snapshot.CriticLoss, "alpha_loss": snapshot.AlphaLoss, "entropy": snapshot.Entropy, "critic_one_q": snapshot.CriticOneQ, "critic_two_q": snapshot.CriticTwoQ, "alpha": snapshot.Alpha, "actor_log_std": []float32{snapshot.ActorLogStdHorizontal, snapshot.ActorLogStdVertical, snapshot.ActorLogStdGripper}, "action_statistics": snapshot.ActionStatistics, "phase_occupancy": snapshot.PhaseOccupancy, "failure_reasons": snapshot.FailureReasons, "last_error": snapshot.LastError}, "worker": worker}
 }
 
 func energyEventLabel(code float32) string {
@@ -284,6 +284,26 @@ func energyEventLabel(code float32) string {
 		return "Unsafe drop: energy lost"
 	case 6:
 		return "Object break: energy lost"
+	default:
+		return ""
+	}
+}
+
+// curriculumStageLabel converts the environment's compact Info value into the
+// active lesson name. In automatic mode this is deliberately not the static
+// launch setting ("auto"), so the dashboard shows the real current lesson.
+func curriculumStageLabel(code float32) string {
+	switch int(code) {
+	case 1:
+		return "align-and-contact"
+	case 2:
+		return "grasp"
+	case 3:
+		return "lift"
+	case 4:
+		return "transport-and-release"
+	case 5:
+		return "full-pick-and-place"
 	default:
 		return ""
 	}

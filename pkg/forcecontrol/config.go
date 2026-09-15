@@ -21,18 +21,37 @@ type HomeostasisConfig struct {
 type CurriculumStage string
 
 const (
-	CurriculumLowerAndContact     CurriculumStage = "lower-and-contact"
-	CurriculumGraspAndLift        CurriculumStage = "grasp-and-lift"
+	// CurriculumAutomatic progresses a worker through the stages after verified
+	// successes without restarting the learner or replacing policy weights.
+	CurriculumAutomatic            CurriculumStage = "auto"
+	CurriculumAlignAndContact      CurriculumStage = "align-and-contact"
+	CurriculumGrasp                CurriculumStage = "grasp"
+	CurriculumLift                 CurriculumStage = "lift"
 	CurriculumTransportAndRelease CurriculumStage = "transport-and-release"
 	CurriculumFullPickAndPlace    CurriculumStage = "full-pick-and-place"
+	// Legacy values remain accepted so an existing local launch configuration
+	// does not fail at registration; new runs should use the finer stages.
+	CurriculumLowerAndContact CurriculumStage = "lower-and-contact"
+	CurriculumGraspAndLift    CurriculumStage = "grasp-and-lift"
 )
 
 func (stage CurriculumStage) Valid() bool {
 	switch stage {
-	case CurriculumLowerAndContact, CurriculumGraspAndLift, CurriculumTransportAndRelease, CurriculumFullPickAndPlace:
+	case CurriculumAutomatic, CurriculumAlignAndContact, CurriculumGrasp, CurriculumLift, CurriculumTransportAndRelease, CurriculumFullPickAndPlace, CurriculumLowerAndContact, CurriculumGraspAndLift:
 		return true
 	default:
 		return false
+	}
+}
+
+func (stage CurriculumStage) canonical() CurriculumStage {
+	switch stage {
+	case CurriculumLowerAndContact:
+		return CurriculumAlignAndContact
+	case CurriculumGraspAndLift:
+		return CurriculumGrasp
+	default:
+		return stage
 	}
 }
 
@@ -68,6 +87,7 @@ type RewardConfig struct {
 	AttachedForceStabilityReward float64
 	InvalidGripPenalty           float64
 	EmptyGripStepPenalty         float64
+	DetachedExcessForcePenalty   float64
 	InactivityPenalty            float64
 	EmptyTargetPenalty           float64
 	DroppedObjectPenalty         float64
@@ -238,6 +258,9 @@ func DefaultConfig() Config {
 			AttachedForceStabilityReward: 0.02,
 			InvalidGripPenalty:           -1.0,
 			EmptyGripStepPenalty:         -0.01,
+			// Empty-space force is not a grasp. A bounded ongoing cost makes
+			// building force to the material limit before contact unattractive.
+			DetachedExcessForcePenalty:   -0.50,
 			InactivityPenalty:            -0.005,
 			EmptyTargetPenalty:           -2.0,
 			DroppedObjectPenalty:         -10.0,

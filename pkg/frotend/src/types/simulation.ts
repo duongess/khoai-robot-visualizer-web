@@ -115,7 +115,9 @@ export interface RuntimeMetrics {
   steps_per_second: number;
   episodes_per_second: number;
   total_steps: number;
-  success_rate: number;
+	success_rate: number;
+	contact_rate?: number;
+	attachment_rate?: number;
   average_reward: number;
   replay_buffer_size: number;
   training_batches: number;
@@ -137,6 +139,7 @@ export interface RuntimeMetrics {
 		filtered_mean: number[];
 		filtered_std: number[];
 		dead_zone_removed_fraction: number[];
+		filter_modified_fraction: number[];
 	};
 	phase_occupancy?: Record<string, number>;
 	failure_reasons?: Record<string, number>;
@@ -190,7 +193,7 @@ export interface WorkerState {
   episode_step: number;
   task_phase: TaskPhase;
 	action_source?: 'policy' | 'random_warmup' | 'pending';
-	curriculum_stage?: 'lower-and-contact' | 'grasp-and-lift' | 'transport-and-release' | 'full-pick-and-place';
+	curriculum_stage?: 'auto' | 'align-and-contact' | 'grasp' | 'lift' | 'transport-and-release' | 'full-pick-and-place' | 'lower-and-contact' | 'grasp-and-lift';
 	gripper_state?: 'open' | 'closed';
 	contact_state?: 'none' | 'contact';
 	force_valid?: boolean;
@@ -215,6 +218,9 @@ export interface WorkerState {
   };
   last_action: {
     normalized_grip_force: number;
+		horizontal?: number;
+		vertical?: number;
+		gripper?: number;
 		filtered_horizontal?: number;
 		filtered_vertical?: number;
 		filtered_gripper?: number;
@@ -271,8 +277,10 @@ export interface WorkerState {
 	};
 	approach_reward?: number;
 	grip_reward?: number;
+	lift_reward?: number;
 	delivery_reward?: number;
 	success_reward?: number;
+	detached_force_penalty?: number;
 	penalty_reward?: number;
 	total_step_reward?: number;
 }

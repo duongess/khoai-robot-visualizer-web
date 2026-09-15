@@ -41,7 +41,10 @@ func main() {
 	if err := forcecontrol.Register(runtime, config); err != nil {
 		log.Fatalf("register force-control task: %v", err)
 	}
-	if err := runtime.Configure(framework.DefaultRuntimeConfig(), learner); err != nil {
+	runtimeConfig := framework.DefaultRuntimeConfig()
+	runtimeConfig.WorkerCount = 1
+
+	if err := runtime.Configure(runtimeConfig, learner); err != nil {
 		log.Fatalf("configure runtime: %v", err)
 	}
 	api, err := pkg.NewAPIServer(runtime, config)

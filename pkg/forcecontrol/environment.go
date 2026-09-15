@@ -59,6 +59,7 @@ type RewardBreakdown struct {
 	Delivery    float64
 	Success     float64
 	Homeostasis float64
+	DetachedForce  float64
 	Penalty     float64
 	Total       float64
 }
@@ -176,6 +177,8 @@ type Environment struct {
 	lastEnergyFoodGain             float64
 	lastEnergyEvent                energyEvent
 	contactStableFrames            int
+	activeCurriculumStage          CurriculumStage
+	advanceCurriculumOnReset       bool
 }
 
 // energyEvent is compactly encoded for StepResult.Info while the visualizer
@@ -193,10 +196,20 @@ const (
 )
 
 func newEnvironment(seed int64, config Config) *Environment {
-	return &Environment{config: config, seed: seed, random: rand.New(rand.NewSource(seed))}
+	stage := config.Curriculum.Stage.canonical()
+	if stage == CurriculumAutomatic {
+		stage = CurriculumAlignAndContact
+	}
+	return &Environment{config: config, seed: seed, random: rand.New(rand.NewSource(seed)), activeCurriculumStage: stage}
 }
 
 func (e *Environment) reset() State {
+	// Keep terminal telemetry attributable to the stage that was actually
+	// completed. The next stage begins only with the following episode.
+	if e.advanceCurriculumOnReset {
+		e.advanceCurriculum()
+		e.advanceCurriculumOnReset = false
+	}
 	e.random = rand.New(rand.NewSource(e.seed))
 	terrainY := e.terrainHeight(e.config.InitialObjectX)
 	e.state = State{
@@ -248,32 +261,63 @@ func (e *Environment) reset() State {
 // criterion. The actor still issues every horizontal, vertical, and grip-rate
 // command; no curriculum branch moves or grips the robot automatically.
 func (e *Environment) applyCurriculumReset() {
-	switch e.config.Curriculum.Stage {
-	case CurriculumLowerAndContact:
-		e.state.CarriageX = e.state.ObjectX
-		_, _, minimumY, maximumY := e.safeBounds()
-		e.state.GripperY = clamp(e.objectGripHeight()+2*e.config.VerticalTolerance, minimumY, maximumY)
-		e.state.Phase = PhaseLowerToObject
-	case CurriculumGraspAndLift:
+	switch e.currentCurriculumStage() {
+	case CurriculumAlignAndContact:
+		// Preserve the configured world position so this stage can learn both
+		// lateral alignment and descent. DefaultConfig begins aligned, while a
+		// task author may randomize the initial carriage position.
+		e.state.Phase = PhaseApproachObject
+	case CurriculumGrasp:
 		e.state.CarriageX = e.state.ObjectX
 		e.state.GripperY = e.objectGripHeight()
 		e.state.Phase = PhaseGripObject
+	case CurriculumLift:
+		e.initializeAttachedObject(e.objectGripHeight(), PhaseLiftObject)
+		// The attachment predates this stage; only the lift milestone is earned.
+		e.gripFoodAwarded = true
 	case CurriculumTransportAndRelease:
-		e.state.CarriageX = e.state.ObjectX
-		carryObjectY := e.requiredCarryHeight()
-		e.state.GripperY = clamp(carryObjectY+e.config.ObjectHeight/2, SafeGripperBounds(e.config, e.state.CarriageX).MinY, SafeGripperBounds(e.config, e.state.CarriageX).MaxY)
-		e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
-		e.state.ObjectX = e.state.CarriageX
-		e.state.GripperOpening = 0
-		e.state.GripForce = math.Min(e.state.ObjectBreakForce-e.config.ReleaseTolerance, e.requiredForce()+e.config.ReleaseTolerance)
-		e.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
-		e.state.ObjectGrasped = true
-		e.state.Phase = PhaseMoveToTarget
-		e.wasEverGrasped = true
+		e.initializeAttachedObject(e.requiredCarryHeight()+e.config.ObjectHeight/2, PhaseMoveToTarget)
 		// These milestones occurred before the curriculum episode began and must
 		// not turn into a repeatable reset reward.
 		e.gripFoodAwarded, e.liftFoodAwarded = true, true
 	}
+}
+
+func (e *Environment) currentCurriculumStage() CurriculumStage {
+	if e.config.Curriculum.Stage == CurriculumAutomatic {
+		return e.activeCurriculumStage
+	}
+	return e.config.Curriculum.Stage.canonical()
+}
+
+func (e *Environment) advanceCurriculum() {
+	if e.config.Curriculum.Stage != CurriculumAutomatic {
+		return
+	}
+	switch e.activeCurriculumStage {
+	case CurriculumAlignAndContact:
+		e.activeCurriculumStage = CurriculumGrasp
+	case CurriculumGrasp:
+		e.activeCurriculumStage = CurriculumLift
+	case CurriculumLift:
+		e.activeCurriculumStage = CurriculumTransportAndRelease
+	case CurriculumTransportAndRelease:
+		e.activeCurriculumStage = CurriculumFullPickAndPlace
+	}
+}
+
+func (e *Environment) initializeAttachedObject(guideY float64, phase Phase) {
+	e.state.CarriageX = e.state.ObjectX
+	bounds := SafeGripperBounds(e.config, e.state.CarriageX)
+	e.state.GripperY = clamp(guideY, bounds.MinY, bounds.MaxY)
+	e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
+	e.state.ObjectX = e.state.CarriageX
+	e.state.GripperOpening = 0
+	e.state.GripForce = math.Min(e.state.ObjectBreakForce-e.config.ReleaseTolerance, e.requiredForce()+e.config.ReleaseTolerance)
+	e.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	e.state.ObjectGrasped = true
+	e.state.Phase = phase
+	e.wasEverGrasped = true
 }
 
 func (e *Environment) step(action []float32) (State, float64, Outcome, bool, error) {
@@ -338,6 +382,9 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 			e.lastReward.Success = e.config.Reward.SuccessfulPlacement
 			e.lastReward.Total += e.lastReward.Success
 			e.successRewardAwarded = true
+		}
+		if e.config.Curriculum.Stage == CurriculumAutomatic {
+			e.advanceCurriculumOnReset = true
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
@@ -571,14 +618,26 @@ func (e *Environment) detectFailure(previous State) string {
 }
 
 func (e *Environment) maxEpisodeSteps() int {
-	if e.config.Curriculum.Stage != CurriculumFullPickAndPlace && e.config.Curriculum.EpisodeStepLimit > 0 {
+	if e.currentCurriculumStage() != CurriculumFullPickAndPlace && e.config.Curriculum.EpisodeStepLimit > 0 {
 		return e.config.Curriculum.EpisodeStepLimit
 	}
 	return e.config.MaxEpisodeSteps
 }
 
 func (e *Environment) updatePhase(previous State) {
-	if e.config.Curriculum.Stage == CurriculumLowerAndContact {
+	stage := e.currentCurriculumStage()
+	if stage == CurriculumGrasp && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping {
+		e.state.Phase = PhaseSuccess
+		return
+	}
+	if stage == CurriculumLift && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
+		e.state.Phase = PhaseSuccess
+		return
+	}
+	if stage == CurriculumAlignAndContact {
+		// Fall through to the ordinary approach/lower phase machine before
+		// evaluating contact, so phase-specific shaping remains truthful.
+		e.updateStandardPhase(previous)
 		if e.state.Grip.ContactDetected && math.Abs(e.state.GripperVelocityY) <= e.config.StableVelocityThreshold && math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
 			e.contactStableFrames++
 		} else {
@@ -589,10 +648,10 @@ func (e *Environment) updatePhase(previous State) {
 		}
 		return
 	}
-	if e.config.Curriculum.Stage == CurriculumGraspAndLift && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
-		e.state.Phase = PhaseSuccess
-		return
-	}
+	e.updateStandardPhase(previous)
+}
+
+func (e *Environment) updateStandardPhase(previous State) {
 	switch previous.Phase {
 	case PhaseApproachObject:
 		if math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance {
@@ -640,7 +699,9 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 	}
 	attached := e.state.Grip.ObjectAttached
 	if previous.Phase == PhaseApproachObject && !attached {
-		breakdown.Approach = e.config.Reward.ApproachProgressScale * (gripperObjectDistance(previous) - gripperObjectDistance(e.state))
+		previousHorizontal := math.Abs(previous.CarriageX - previous.ObjectX)
+		currentHorizontal := math.Abs(e.state.CarriageX - e.state.ObjectX)
+		breakdown.Approach = e.config.Reward.ApproachProgressScale * (previousHorizontal - currentHorizontal)
 	}
 	if previous.Phase == PhaseLowerToObject && !attached {
 		previousError := e.graspPoseDistanceFor(previous)
@@ -678,6 +739,16 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 	// idle closed gripper from becoming a cheap equilibrium.
 	if !attached && e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected {
 		breakdown.Penalty += e.config.Reward.EmptyGripStepPenalty
+	}
+	if !attached && !e.state.Grip.ContactDetected && e.state.GripForce > e.requiredForce() {
+		// Scale quadratically through the usable force band: a slight excess is
+		// recoverable, while approaching break force in empty space is clearly
+		// worse than waiting for real contact. The reward never turns force into
+		// an autonomous command; it only scores the actor's chosen rate action.
+		usableBand := math.Max(e.state.ObjectBreakForce-e.requiredForce(), 1e-9)
+		ratio := clamp((e.state.GripForce-e.requiredForce())/usableBand, 0, 1)
+		breakdown.DetachedForce = e.config.Reward.DetachedExcessForcePenalty * ratio * ratio
+		breakdown.Penalty += breakdown.DetachedForce
 	}
 	// Progress shaping rewards useful approach/lowering motion. A small cost for
 	// no physical movement in those phases removes the otherwise nearly-free
@@ -796,15 +867,17 @@ func (e *Environment) failureReasonCode() int {
 }
 
 func (e *Environment) curriculumStageCode() int {
-	switch e.config.Curriculum.Stage {
-	case CurriculumLowerAndContact:
+	switch e.currentCurriculumStage() {
+	case CurriculumAlignAndContact:
 		return 1
-	case CurriculumGraspAndLift:
+	case CurriculumGrasp:
 		return 2
-	case CurriculumTransportAndRelease:
+	case CurriculumLift:
 		return 3
-	case CurriculumFullPickAndPlace:
+	case CurriculumTransportAndRelease:
 		return 4
+	case CurriculumFullPickAndPlace:
+		return 5
 	default:
 		return 0
 	}

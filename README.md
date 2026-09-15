@@ -71,6 +71,27 @@ cd khoai-robot-visualizer-web
 go run ./cmd/force-control-demo
 ```
 
+For a fresh curriculum run, start a new learner process (the replay buffer is
+in-memory). Select `auto` to have every worker progress through
+`align-and-contact` → `grasp` → `lift` → `transport-and-release` →
+`full-pick-and-place` after real success. The learner process, policy weights,
+and replay buffer stay alive across those lessons:
+
+```bash
+FORCE_CONTROL_CURRICULUM=auto go run ./cmd/force-control-demo
+```
+
+You can still pin a single stage (`align-and-contact`, `grasp`, `lift`,
+`transport-and-release`, or `full-pick-and-place`) for diagnosis. Automatic
+progression advances only after the current stage's physical terminal
+criterion, and the dashboard reports the active stage rather than merely
+displaying `auto`.
+
+All stages retain the same continuous action contract: horizontal, vertical
+(world `+Y` up, negative descends), and signed grip-force rate. They change
+only reset distributions and verified terminal conditions; they do not issue
+robot actions for the policy.
+
 Open `http://127.0.0.1:8080`. The browser connects only to the Go process through `/api/*` and `/ws`; it never connects to Python directly.
 
 For frontend hot reload, run Vite separately:

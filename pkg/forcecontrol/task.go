@@ -99,6 +99,7 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"delivery_reward":              float32(breakdown.Delivery),
 		"success_reward":               float32(breakdown.Success),
 		"homeostasis_reward":           float32(breakdown.Homeostasis),
+		"detached_force_penalty":       float32(breakdown.DetachedForce),
 		"penalty_reward":               float32(breakdown.Penalty),
 		"total_step_reward":            float32(breakdown.Total),
 	}

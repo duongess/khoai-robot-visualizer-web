@@ -190,6 +190,13 @@ export const PhysicsMetrics: React.FC = () => {
 			  raw {rawVerticalAction.toFixed(3)} · filtered {filteredVerticalAction.toFixed(3)} · velocity {verticalVelocity.toFixed(3)} m/s · dead-zone {verticalDeadZonePercent.toFixed(1)}% · step {worker?.episode_step ?? 0}{boundaryHit ? ' · BOUNDARY' : ''}
 			</div>
 		  </div>
+
+		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
+			<div className="text-[10px] text-slate-400">Action Pipeline (raw → filtered)</div>
+			<div className="font-mono text-[10px] text-slate-200 mt-0.5">
+			  x {(worker?.last_action.horizontal ?? 0).toFixed(3)} → {(worker?.last_action.filtered_horizontal ?? 0).toFixed(3)} · y {(worker?.last_action.vertical ?? 0).toFixed(3)} → {(worker?.last_action.filtered_vertical ?? 0).toFixed(3)} · grip {(worker?.last_action.gripper ?? 0).toFixed(3)} → {(worker?.last_action.filtered_gripper ?? 0).toFixed(3)}
+			</div>
+		  </div>
         </div>
 
         {runtimeError && (

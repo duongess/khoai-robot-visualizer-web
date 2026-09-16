@@ -307,7 +307,7 @@ export const RobotCanvas: React.FC = () => {
       dragTargetRef.current = 'object';
       setSelectedEntity('object');
       setIsDraggingEntity(true);
-      setCursorStyle('grabbing');
+      setCursorStyle('ew-resize');
       canvas.setPointerCapture(e.pointerId);
       return;
     }
@@ -387,17 +387,17 @@ export const RobotCanvas: React.FC = () => {
 
       switch (dragTargetRef.current) {
         case 'object': {
-          // Clamp object within world horizontal bounds
+          // A resting object has one authoritative vertical position: its
+          // centre sits on terrain. The Go environment uses this same rule, so
+          // the editor moves it horizontally instead of previewing a floating
+          // Y value that would be discarded when the scene is submitted.
           const halfW = draftConfig.object.width / 2;
           const clampedX = Math.min(workspaceBounds.maxX-halfW, Math.max(workspaceBounds.minX+halfW, worldPos.x));
-          // Clamp Y to be above terrain
           const terrainY = getTerrainHeightAt(clampedX, draftConfig.terrain.points);
-          const minY = terrainY + draftConfig.object.height / 2;
-          const clampedY = Math.min(workspaceBounds.maxY-draftConfig.object.height/2, Math.max(minY, worldPos.y));
 
           updateDraftObject({
             position_x: Number(clampedX.toFixed(2)),
-            position_y: Number(clampedY.toFixed(2)),
+            position_y: Number((terrainY + draftConfig.object.height / 2).toFixed(2)),
           });
           break;
         }
@@ -486,7 +486,7 @@ export const RobotCanvas: React.FC = () => {
     );
     if (isObj) {
       setHoveredEntity('object');
-      setCursorStyle('grab');
+      setCursorStyle('ew-resize');
       return;
     }
 

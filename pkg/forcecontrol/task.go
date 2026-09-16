@@ -23,6 +23,8 @@ type Task struct {
 }
 
 var _ framework.Task = (*Task)(nil)
+var _ framework.ReviewableTask = (*Task)(nil)
+var _ framework.TelemetryTask = (*Task)(nil)
 
 // NewTask creates an independent force-control task instance.
 func NewTask(seed int64, config Config) *Task {
@@ -38,6 +40,30 @@ func (t *Task) Reset() (framework.State, error) {
 		return nil, err
 	}
 	return t.environment.observation(), nil
+}
+
+// ApproveCurriculumReview is called only by the paused runtime review path.
+// It advances a curriculum distribution without claiming a physical success.
+func (t *Task) ApproveCurriculumReview() error {
+	if t == nil || t.environment == nil {
+		return errors.New("force-control task is not initialized")
+	}
+	return t.environment.approveCurriculumReview()
+}
+
+// TelemetryMetadata returns a fresh immutable snapshot of task-owned data
+// that is not encoded in the fixed-size policy observation. The framework
+// uses it only for visualization; it never feeds this data back to the actor.
+func (t *Task) TelemetryMetadata() map[string]any {
+	if t == nil || t.environment == nil {
+		return nil
+	}
+	terrain := append([]TerrainPoint(nil), t.environment.config.Terrain...)
+	return map[string]any{
+		"terrain_points":                    terrain,
+		"curriculum_contact_success_streak": t.environment.contactSuccessStreak,
+		"curriculum_contact_successes_required": t.config.Curriculum.ContactSuccessesRequired,
+	}
 }
 
 func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
@@ -63,6 +89,8 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"phase_numeric":                float32(state.Phase),
 		"current_phase":                float32(state.Phase),
 		"curriculum_stage_code":        float32(t.environment.curriculumStageCode()),
+		"curriculum_contact_success_streak": float32(t.environment.contactSuccessStreak),
+		"curriculum_contact_successes_required": float32(t.config.Curriculum.ContactSuccessesRequired),
 		"failure_reason_code":          float32(t.environment.failureReasonCode()),
 		"episode_step":                 float32(state.EpisodeStep),
 		"energy":                       float32(state.Energy),

@@ -55,13 +55,37 @@ func (stage CurriculumStage) canonical() CurriculumStage {
 	}
 }
 
+// CurriculumRandomization defines reproducible variation around the manually
+// configured scene. It is reset-distribution data, never a hidden controller.
+type CurriculumRandomization struct {
+	Enabled                  bool
+	ObjectXJitter            float64
+	TargetXJitter            float64
+	ObjectMassJitter         float64
+	ObjectFrictionJitter     float64
+	// ContactStartHeightJitter is retained for compatibility with existing
+	// configs; it now jitters the detached gripper's reset height rather than
+	// positioning the carriage above the object.
+	ContactStartHeightJitter float64
+	// TerrainHeightJitter independently varies each terrain control-point
+	// height on every randomized reset. X coordinates remain fixed so the
+	// piecewise-linear ground never becomes self-intersecting.
+	TerrainHeightJitter      float64
+}
+
 // CurriculumConfig contains only task-distribution and verification settings.
 type CurriculumConfig struct {
 	Stage CurriculumStage
-	// ContactStartHeightOffset places the novice contact lesson just above the
-	// physical grasp guide. It changes only reset distribution, never actions.
+	// ContactStartHeightOffset is retained for existing launch configs. Lessons
+	// no longer pre-position the gripper near the object.
 	ContactStartHeightOffset float64
 	ContactStableSteps       int
+	// ContactSuccessesRequired is the number of consecutive completed
+	// align-and-contact episodes required before automatic curriculum advances.
+	// It is intentionally distinct from ContactStableSteps, which measures
+	// physical frames within one episode.
+	ContactSuccessesRequired int
+	Randomization            CurriculumRandomization
 	// EpisodeStepLimit applies only to a non-full curriculum stage when
 	// positive. Shorter stages must reset frequently enough to sample their
 	// narrow initial distribution instead of spending a full task horizon away
@@ -206,11 +230,14 @@ func DefaultConfig() Config {
 		InitialObjectMass:         0.8,
 		ObjectFriction:            0.35,
 		ObjectBreakForce:          18,
-		InitialCarriageX:          1.5,
+		// Deliberately independent from InitialObjectX. The controller observes
+		// the object-relative delta and must learn the horizontal approach; reset
+		// never moves the carriage onto the object on its behalf.
+		InitialCarriageX:          3.0,
 		InitialGripperY:           2.8,
 		TargetX:                   4.5,
 		TargetWidth:               0.8,
-		MaxEpisodeSteps:           500,
+		MaxEpisodeSteps:           1000,
 		HorizontalTolerance:       0.15,
 		VerticalTolerance:         0.10,
 		GraspHorizontalTolerance:  0.15,
@@ -239,15 +266,33 @@ func DefaultConfig() Config {
 		Curriculum: CurriculumConfig{
 			Stage:                    CurriculumFullPickAndPlace,
 			ContactStartHeightOffset: 0.30,
-			// The contact lesson is intentionally a contact lesson: a single real
-			// contact frame passes it. Later grasp/transport stages retain their
-			// respective attachment and stability requirements.
+			// A real contact needs only one settled physics frame within an
+			// episode, but automatic curriculum requires three consecutive contact
+			// episodes before proceeding to grasp.
 			ContactStableSteps: 1,
-			EpisodeStepLimit:   96,
+			ContactSuccessesRequired: 3,
+			// Disabled for the deterministic default scene. The demo turns this on
+			// for FORCE_CONTROL_CURRICULUM=auto, where every lesson benefits from
+			// varied but reproducible reset conditions.
+			Randomization: CurriculumRandomization{
+				ObjectXJitter:            1.20,
+				TargetXJitter:            1.00,
+				ObjectMassJitter:         0.15,
+				ObjectFrictionJitter:     0.06,
+				ContactStartHeightJitter: 0.15,
+				TerrainHeightJitter:      0.25,
+			},
+			// Every curriculum lesson gets enough horizon to carry out the
+			// prerequisite approach itself; no lesson receives a scripted grasp or
+			// attachment at reset.
+			EpisodeStepLimit:   1000,
 		},
 		Reward: RewardConfig{
 			TimePenalty:                  -0.001,
-			ApproachProgressScale:        1.0,
+			// The first learned subgoal is horizontal object approach. Signed
+			// distance progress dominates the small time cost, while movement away
+			// receives the equal negative term.
+			ApproachProgressScale:        3.0,
 			SuccessfulGripReward:         5.0,
 			LiftProgressScale:            2.0,
 			DeliveryProgressScale:        3.0,

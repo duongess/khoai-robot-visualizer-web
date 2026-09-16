@@ -1,7 +1,9 @@
 package pkg
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -113,5 +115,40 @@ func TestObjectStatusRequiresPhysicalContact(t *testing.T) {
 	}
 	if status := objectStatus(forcecontrol.PhaseMoveToTarget, true, true, true, false, false); status != "transported" {
 		t.Fatalf("attached moving object reported %q, want transported", status)
+	}
+}
+
+func TestAPIServerAcceptsCanvasObjectIDAndLegacyTargetY(t *testing.T) {
+	runtime := framework.NewRuntime()
+	config := forcecontrol.DefaultConfig()
+	if err := forcecontrol.Register(runtime, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Configure(framework.DefaultRuntimeConfig(), apiTestLearner{}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewAPIServer(runtime, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{
+		"object": map[string]any{"id": "object-1", "position": map[string]float64{"x": 2.1, "y": 0.7}},
+		"target": map[string]any{"position": map[string]float64{"x": 4.4, "y": 0}},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/scene", bytes.NewReader(body))
+	server.APIHandler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("canvas scene update status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := server.config.InitialObjectX; got != 2.1 {
+		t.Fatalf("object x = %v, want 2.1", got)
+	}
+	if got := server.config.TargetX; got != 4.4 {
+		t.Fatalf("target x = %v, want 4.4", got)
 	}
 }

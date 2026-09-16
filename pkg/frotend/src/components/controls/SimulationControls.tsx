@@ -1,6 +1,6 @@
 import React from 'react';
 import { useSimulationStore } from '../../lib/simulation-store';
-import { Play, Pause, RotateCw, RefreshCw, Layers, ShieldCheck, AlertTriangle } from 'lucide-react';
+import { Play, Pause, RotateCw, RefreshCw, Layers, ShieldCheck, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { SimulationMode } from '../../types/simulation';
 
 export const SimulationControls: React.FC = () => {
@@ -11,6 +11,7 @@ export const SimulationControls: React.FC = () => {
     pauseSimulation,
     resumeSimulation,
     resetSimulation,
+		approveCurriculumReview,
     requestModeChange,
     selectedWorkerId,
     setSelectedWorker,
@@ -97,7 +98,22 @@ export const SimulationControls: React.FC = () => {
             <span>Reset</span>
           </button>
 
-          {/* Runtime Status Pill */}
+			<button
+				id="control-approve-curriculum-btn"
+				onClick={() => void approveCurriculumReview()}
+				disabled={!isPaused}
+				title="Advance the selected automatic-curriculum worker without recording a synthetic success reward."
+				className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+					!isPaused
+						? 'bg-slate-800/40 text-slate-500 border-slate-800 cursor-not-allowed'
+						: 'bg-violet-600 hover:bg-violet-500 text-white border-violet-500'
+				}`}
+			>
+				<CheckCircle2 className="w-4 h-4" />
+				<span>Review &amp; Advance</span>
+			</button>
+
+			{/* Runtime Status Pill */}
           <div
             id="runtime-status-pill"
             className={`ml-2 flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono font-medium border ${statusBadge.bg} ${statusBadge.border} ${statusBadge.text}`}

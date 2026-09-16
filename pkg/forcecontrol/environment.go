@@ -10,9 +10,10 @@ import (
 // ObservationDimension is the fixed goal-conditioned policy input size.
 const ObservationDimension = 23
 
-// CoordinateSystemVersion changes whenever action meaning or observation
-// normalization changes. Checkpoints for earlier schemas must not be reused.
-const CoordinateSystemVersion = 10
+// CoordinateSystemVersion changes whenever policy-facing semantics, reward
+// semantics, or reset distributions change. Checkpoints for earlier schemas
+// must not be reused for a scientific comparison.
+const CoordinateSystemVersion = 11
 
 const (
 	observationGripperX = iota
@@ -145,11 +146,12 @@ type State struct {
 
 // Environment owns all mutable state for one independent task instance.
 type Environment struct {
-	config Config
-	seed   int64
-	random *rand.Rand
-	state  State
-	ready  bool
+	config      Config
+	baseTerrain []TerrainPoint
+	seed        int64
+	random      *rand.Rand
+	state       State
+	ready       bool
 
 	gripBonusAwarded               bool
 	gripFoodAwarded                bool
@@ -177,8 +179,10 @@ type Environment struct {
 	lastEnergyFoodGain             float64
 	lastEnergyEvent                energyEvent
 	contactStableFrames            int
+	contactSuccessStreak           int
 	activeCurriculumStage          CurriculumStage
 	advanceCurriculumOnReset       bool
+	resetCount                     uint64
 }
 
 // energyEvent is compactly encoded for StepResult.Info while the visualizer
@@ -200,31 +204,43 @@ func newEnvironment(seed int64, config Config) *Environment {
 	if stage == CurriculumAutomatic {
 		stage = CurriculumAlignAndContact
 	}
-	return &Environment{config: config, seed: seed, random: rand.New(rand.NewSource(seed)), activeCurriculumStage: stage}
+	baseTerrain := append([]TerrainPoint(nil), config.Terrain...)
+	return &Environment{config: config, baseTerrain: baseTerrain, seed: seed, random: rand.New(rand.NewSource(seed)), activeCurriculumStage: stage}
 }
 
 func (e *Environment) reset() State {
+	// A user/runtime reset of an unfinished first-lesson episode is not a
+	// verified contact success. Clear the streak so it cannot be advanced by
+	// abandoning unsuccessful attempts between valid contacts.
+	if e.ready && e.config.Curriculum.Stage == CurriculumAutomatic && e.currentCurriculumStage() == CurriculumAlignAndContact && e.state.Phase != PhaseSuccess {
+		e.contactSuccessStreak = 0
+	}
 	// Keep terminal telemetry attributable to the stage that was actually
 	// completed. The next stage begins only with the following episode.
 	if e.advanceCurriculumOnReset {
 		e.advanceCurriculum()
 		e.advanceCurriculumOnReset = false
 	}
-	e.random = rand.New(rand.NewSource(e.seed))
-	terrainY := e.terrainHeight(e.config.InitialObjectX)
+	e.resetTerrain()
+	objectX, targetX, objectMass, objectFriction := e.sampleEpisodeParameters()
+	terrainY := e.terrainHeight(objectX)
 	e.state = State{
 		CarriageX:        e.config.InitialCarriageX,
 		GripperY:         e.config.InitialGripperY,
 		GripperOpening:   1,
-		ObjectX:          e.config.InitialObjectX,
+		ObjectX:          objectX,
 		ObjectY:          terrainY + e.config.ObjectHeight/2,
-		ObjectMass:       e.config.InitialObjectMass,
-		ObjectFriction:   e.config.ObjectFriction,
+		ObjectMass:       objectMass,
+		ObjectFriction:   objectFriction,
 		ObjectBreakForce: e.config.ObjectBreakForce,
-		TargetX:          e.config.TargetX,
-		TargetY:          e.terrainHeight(e.config.TargetX),
+		TargetX:          targetX,
+		TargetY:          e.terrainHeight(targetX),
 		Phase:            PhaseApproachObject,
 		Energy:           clamp(e.config.Homeostasis.InitialEnergy, 0, 1),
+	}
+	if e.config.Curriculum.Randomization.Enabled && e.resetCount > 0 {
+		_, _, minimumY, maximumY := e.safeBounds()
+		e.state.GripperY = clamp(e.state.GripperY+e.symmetricJitter(e.config.Curriculum.Randomization.ContactStartHeightJitter), minimumY, maximumY)
 	}
 	e.gripBonusAwarded = false
 	e.gripFoodAwarded = false
@@ -253,39 +269,71 @@ func (e *Environment) reset() State {
 	e.lastEnergyEvent = energyEventNone
 	e.contactStableFrames = 0
 	e.applyCurriculumReset()
+	e.resetCount++
 	e.ready = true
 	return e.state
 }
 
-// applyCurriculumReset changes only the initial physical state and stage
-// criterion. The actor still issues every horizontal, vertical, and grip-rate
-// command; no curriculum branch moves or grips the robot automatically.
+// applyCurriculumReset keeps every lesson physically fresh. Curriculum only
+// changes the terminal milestone; it does not align the carriage, lower the
+// gripper, or create an attachment. This makes a successful horizontal
+// approach attributable to the policy's object-relative observation.
 func (e *Environment) applyCurriculumReset() {
-	switch e.currentCurriculumStage() {
-	case CurriculumAlignAndContact:
-		// This first lesson deliberately isolates the final downward approach.
-		// Starting 2.8 m above the object made a supposedly simple contact task
-		// indistinguishable from a full pick-and-place episode under exploration.
-		// It is still the policy that commands the descent; reset merely selects a
-		// reachable initial state close to the grasp guide.
-		e.state.CarriageX = e.state.ObjectX
-		bounds := SafeGripperBounds(e.config, e.state.CarriageX)
-		e.state.GripperY = clamp(e.objectGripHeight()+e.config.Curriculum.ContactStartHeightOffset, bounds.MinY, bounds.MaxY)
-		e.state.Phase = PhaseLowerToObject
-	case CurriculumGrasp:
-		e.state.CarriageX = e.state.ObjectX
-		e.state.GripperY = e.objectGripHeight()
-		e.state.Phase = PhaseGripObject
-	case CurriculumLift:
-		e.initializeAttachedObject(e.objectGripHeight(), PhaseLiftObject)
-		// The attachment predates this stage; only the lift milestone is earned.
-		e.gripFoodAwarded = true
-	case CurriculumTransportAndRelease:
-		e.initializeAttachedObject(e.requiredCarryHeight()+e.config.ObjectHeight/2, PhaseMoveToTarget)
-		// These milestones occurred before the curriculum episode began and must
-		// not turn into a repeatable reset reward.
-		e.gripFoodAwarded, e.liftFoodAwarded = true, true
+	e.state.Phase = PhaseApproachObject
+}
+
+// sampleEpisodeParameters produces a deterministic sequence for a given task
+// seed while varying every automatic-curriculum reset. Manual scene edits set
+// the centre of each distribution rather than being overwritten by a second
+// frontend-only object position.
+func (e *Environment) sampleEpisodeParameters() (objectX, targetX, mass, friction float64) {
+	objectX, targetX = e.config.InitialObjectX, e.config.TargetX
+	mass, friction = e.config.InitialObjectMass, e.config.ObjectFriction
+	randomization := e.config.Curriculum.Randomization
+	// The first reset after creating/replacing a task is exact. This makes a
+	// paused manual scene edit observable as the episode's authoritative state;
+	// subsequent resets vary around that manually chosen baseline.
+	if !randomization.Enabled || e.resetCount == 0 {
+		return
 	}
+	objectX = clamp(objectX+e.symmetricJitter(randomization.ObjectXJitter), e.config.Workspace.MinX+e.config.ObjectWidth/2, e.config.Workspace.MaxX-e.config.ObjectWidth/2)
+	targetX = clamp(targetX+e.symmetricJitter(randomization.TargetXJitter), e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
+	mass = math.Max(0.01, mass+e.symmetricJitter(randomization.ObjectMassJitter))
+	friction = clamp(friction+e.symmetricJitter(randomization.ObjectFrictionJitter), 0.05, 2)
+
+	// Do not accidentally turn transport into a zero-distance placement task.
+	minimumSeparation := (e.config.ObjectWidth+e.config.TargetWidth)/2 + e.config.HorizontalTolerance
+	if math.Abs(targetX-objectX) < minimumSeparation {
+		if targetX >= objectX {
+			targetX = clamp(objectX+minimumSeparation, e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
+		} else {
+			targetX = clamp(objectX-minimumSeparation, e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
+		}
+	}
+	return
+}
+
+// resetTerrain restores the manually configured terrain and then, for
+// automatic randomized episodes, perturbs only its heights. Object and target
+// resting heights are calculated after this call, so neither can be embedded
+// in the terrain merely because the ground changed.
+func (e *Environment) resetTerrain() {
+	e.config.Terrain = append(e.config.Terrain[:0], e.baseTerrain...)
+	randomization := e.config.Curriculum.Randomization
+	if !randomization.Enabled || e.resetCount == 0 || randomization.TerrainHeightJitter == 0 {
+		return
+	}
+	maximumHeight := e.config.Workspace.MaxY - e.config.GripperBodyHeight - e.config.GripperFingerLength - e.config.GripperClearance
+	for index := range e.config.Terrain {
+		e.config.Terrain[index].Y = clamp(e.config.Terrain[index].Y+e.symmetricJitter(randomization.TerrainHeightJitter), e.config.Workspace.MinY, maximumHeight)
+	}
+}
+
+func (e *Environment) symmetricJitter(magnitude float64) float64 {
+	if magnitude == 0 {
+		return 0
+	}
+	return (2*e.random.Float64() - 1) * magnitude
 }
 
 func (e *Environment) currentCurriculumStage() CurriculumStage {
@@ -309,20 +357,21 @@ func (e *Environment) advanceCurriculum() {
 	case CurriculumTransportAndRelease:
 		e.activeCurriculumStage = CurriculumFullPickAndPlace
 	}
+	e.contactSuccessStreak = 0
 }
 
-func (e *Environment) initializeAttachedObject(guideY float64, phase Phase) {
-	e.state.CarriageX = e.state.ObjectX
-	bounds := SafeGripperBounds(e.config, e.state.CarriageX)
-	e.state.GripperY = clamp(guideY, bounds.MinY, bounds.MaxY)
-	e.state.ObjectY = e.state.GripperY - e.config.ObjectHeight/2
-	e.state.ObjectX = e.state.CarriageX
-	e.state.GripperOpening = 0
-	e.state.GripForce = math.Min(e.state.ObjectBreakForce-e.config.ReleaseTolerance, e.requiredForce()+e.config.ReleaseTolerance)
-	e.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
-	e.state.ObjectGrasped = true
-	e.state.Phase = phase
-	e.wasEverGrasped = true
+// approveCurriculumReview is an explicit human override for an automatic
+// curriculum. It changes only the next reset distribution; it never marks an
+// episode successful or manufactures a reward/replay transition.
+func (e *Environment) approveCurriculumReview() error {
+	if e.config.Curriculum.Stage != CurriculumAutomatic {
+		return errors.New("manual curriculum review requires FORCE_CONTROL_CURRICULUM=auto")
+	}
+	if e.activeCurriculumStage == CurriculumFullPickAndPlace {
+		return errors.New("full-pick-and-place is the final curriculum stage")
+	}
+	e.advanceCurriculum()
+	return nil
 }
 
 func (e *Environment) step(action []float32) (State, float64, Outcome, bool, error) {
@@ -364,6 +413,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.updatePlacementStability()
 	e.state.EpisodeStep++
 	if err := e.ValidateState(); err != nil {
+		e.resetContactSuccessStreakOnFailure()
 		e.failureReason, e.state.Phase = "invalid_state", PhaseFailure
 		e.updateHomeostasis("workspace_violation")
 		e.lastReward = RewardBreakdown{Homeostasis: e.lastEnergyDelta, Penalty: e.config.Reward.WorkspacePenalty, Total: e.lastEnergyDelta + e.config.Reward.WorkspacePenalty}
@@ -372,6 +422,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 
 	terminalReason := e.detectFailure(previous)
 	if terminalReason != "" {
+		e.resetContactSuccessStreakOnFailure()
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
 		e.updateHomeostasis(terminalReason)
 		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
@@ -389,12 +440,26 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 			e.successRewardAwarded = true
 		}
 		if e.config.Curriculum.Stage == CurriculumAutomatic {
-			e.advanceCurriculumOnReset = true
+			if e.currentCurriculumStage() == CurriculumAlignAndContact {
+				e.contactSuccessStreak++
+				e.advanceCurriculumOnReset = e.contactSuccessStreak >= e.config.Curriculum.ContactSuccessesRequired
+			} else {
+				e.advanceCurriculumOnReset = true
+			}
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
 	e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
+}
+
+// resetContactSuccessStreakOnFailure makes the first automatic lesson require
+// three consecutive successful episodes, rather than three arbitrary contacts
+// accumulated across timeouts or unsafe episodes.
+func (e *Environment) resetContactSuccessStreakOnFailure() {
+	if e.config.Curriculum.Stage == CurriculumAutomatic && e.currentCurriculumStage() == CurriculumAlignAndContact {
+		e.contactSuccessStreak = 0
+	}
 }
 
 func (e *Environment) validatedAction(action []float32) ([3]float64, error) {

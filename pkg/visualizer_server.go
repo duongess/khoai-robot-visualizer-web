@@ -62,6 +62,8 @@ func (s *APIServer) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.lifecycle(w, s.runtime.Resume)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/simulation/reset":
 		s.lifecycle(w, s.runtime.Reset)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/evaluation/approve":
+		s.approveCurriculumReview(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/simulation/stop":
 		s.runtime.Stop()
 		s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -82,6 +84,29 @@ func (s *APIServer) lifecycle(w http.ResponseWriter, operation func() error) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+type curriculumReviewRequest struct {
+	WorkerID int `json:"worker_id"`
+}
+
+func (s *APIServer) approveCurriculumReview(w http.ResponseWriter, r *http.Request) {
+	if s.runtime.Snapshot().Status != framework.RuntimePaused {
+		s.writeError(w, http.StatusConflict, "SIMULATION_NOT_PAUSED", "Pause the simulation before approving a curriculum review.")
+		return
+	}
+	var request curriculumReviewRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil || request.WorkerID <= 0 {
+		s.writeError(w, http.StatusBadRequest, "INVALID_REVIEW", "worker_id must be a positive integer.")
+		return
+	}
+	if err := s.runtime.ApproveCurriculumReview(request.WorkerID); err != nil {
+		s.writeError(w, http.StatusConflict, "CURRICULUM_REVIEW_REJECTED", err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "worker_id": request.WorkerID, "note": "No synthetic reward or success transition was recorded."})
+}
+
 type sceneUpdate struct {
 	Object *sceneObjectUpdate `json:"object"`
 	Gantry *struct {
@@ -90,7 +115,10 @@ type sceneUpdate struct {
 	} `json:"gantry"`
 	Target *struct {
 		Position struct {
-			X float64 `json:"x"`
+			X float64  `json:"x"`
+			// Target Y is accepted for backwards-compatible scene payloads, but
+			// placement height is derived from the authoritative terrain.
+			Y *float64 `json:"y"`
 		} `json:"position"`
 	} `json:"target"`
 	Terrain *struct {
@@ -99,6 +127,9 @@ type sceneUpdate struct {
 }
 
 type sceneObjectUpdate struct {
+	// ID is a stable frontend selection identifier, not an environment body ID.
+	// Accept it so direct canvas drags remain compatible with strict decoding.
+	ID       string `json:"id"`
 	Position struct {
 		X float64 `json:"x"`
 		Y float64 `json:"y"`
@@ -199,7 +230,7 @@ func (s *APIServer) sceneConfig() map[string]any {
 		points[i] = terrainPoint{ID: "terrain-" + string(rune('1'+i)), X: point.X, Y: point.Y}
 	}
 	bounds := forcecontrol.SafeGripperBounds(config, config.InitialCarriageX)
-	return map[string]any{"workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "object": map[string]any{"id": "object-1", "position_x": config.InitialObjectX, "position_y": terrainAt(config, config.InitialObjectX) + config.ObjectHeight/2, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": config.ObjectBreakForce, "initial_vertical_velocity": 0, "width": config.ObjectWidth, "height": config.ObjectHeight}, "gantry": map[string]any{"rail_y": config.RailY, "carriage_x": config.InitialCarriageX, "gripper_y": config.InitialGripperY, "min_x": bounds.MinX, "max_x": bounds.MaxX, "min_y": bounds.MinY, "max_y": bounds.MaxY, "initial_grip_force": 0, "minimum_grip_force": 0, "maximum_grip_force": config.MaxGripForce}, "terrain": map[string]any{"points": points, "ground_friction": config.ObjectFriction, "gravity": config.Gravity}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}, "curriculum": map[string]any{"stage": config.Curriculum.Stage, "contact_start_height_offset": config.Curriculum.ContactStartHeightOffset, "contact_stable_steps": config.Curriculum.ContactStableSteps, "episode_step_limit": config.Curriculum.EpisodeStepLimit}}
+	return map[string]any{"workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "object": map[string]any{"id": "object-1", "position_x": config.InitialObjectX, "position_y": terrainAt(config, config.InitialObjectX) + config.ObjectHeight/2, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": config.ObjectBreakForce, "initial_vertical_velocity": 0, "width": config.ObjectWidth, "height": config.ObjectHeight}, "gantry": map[string]any{"rail_y": config.RailY, "carriage_x": config.InitialCarriageX, "gripper_y": config.InitialGripperY, "min_x": bounds.MinX, "max_x": bounds.MaxX, "min_y": bounds.MinY, "max_y": bounds.MaxY, "initial_grip_force": 0, "minimum_grip_force": 0, "maximum_grip_force": config.MaxGripForce}, "terrain": map[string]any{"points": points, "ground_friction": config.ObjectFriction, "gravity": config.Gravity}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}, "curriculum": map[string]any{"stage": config.Curriculum.Stage, "contact_start_height_offset": config.Curriculum.ContactStartHeightOffset, "contact_stable_steps": config.Curriculum.ContactStableSteps, "contact_successes_required": config.Curriculum.ContactSuccessesRequired, "randomization": config.Curriculum.Randomization, "episode_step_limit": config.Curriculum.EpisodeStepLimit}}
 }
 
 func (s *APIServer) telemetry() map[string]any {
@@ -210,6 +241,24 @@ func (s *APIServer) telemetry() map[string]any {
 	worker := map[string]any{}
 	if len(snapshot.Workers) > 0 {
 		selected := snapshot.Workers[0]
+		runtimeConfig := config
+		terrainPoints := s.sceneConfig()["terrain"].(map[string]any)["points"]
+		contactEpisodeSuccesses := float64(selected.Info["curriculum_contact_success_streak"])
+		contactEpisodeSuccessesRequired := float64(selected.Info["curriculum_contact_successes_required"])
+		if value, ok := selected.Metadata["curriculum_contact_success_streak"].(int); ok {
+			contactEpisodeSuccesses = float64(value)
+		}
+		if value, ok := selected.Metadata["curriculum_contact_successes_required"].(int); ok {
+			contactEpisodeSuccessesRequired = float64(value)
+		}
+		if points, ok := selected.Metadata["terrain_points"].([]forcecontrol.TerrainPoint); ok && len(points) >= 2 {
+			runtimeConfig.Terrain = append([]forcecontrol.TerrainPoint(nil), points...)
+			displayPoints := make([]terrainPoint, len(points))
+			for index, point := range points {
+				displayPoints[index] = terrainPoint{ID: "terrain-" + string(rune('1'+index)), X: point.X, Y: point.Y}
+			}
+			terrainPoints = displayPoints
+		}
 		values := selected.State
 		get := func(index int) float64 {
 			if index >= len(values) {
@@ -236,9 +285,9 @@ func (s *APIServer) telemetry() map[string]any {
 			forceActionMode = "decrease"
 		}
 		gripForce := denormalize(get(16), 0, config.MaxGripForce)
-		safeBounds := forcecontrol.SafeGripperBounds(config, carriageX)
+		safeBounds := forcecontrol.SafeGripperBounds(runtimeConfig, carriageX)
 		targetX, targetY := denormalize(get(8), config.Workspace.MinX, config.Workspace.MaxX), denormalize(get(9), config.Workspace.MinY, config.Workspace.MaxY)
-		targetGraspY := forcecontrol.GraspHeight(config, objectY, carriageX)
+		targetGraspY := forcecontrol.GraspHeight(runtimeConfig, objectY, carriageX)
 		boundaryHit := selected.Info["boundary_hit"] > 0
 		gripperClosed := selected.Info["gripper_closed"] > 0
 		contactDetected := selected.Info["contact_detected"] > 0
@@ -257,12 +306,13 @@ func (s *APIServer) telemetry() map[string]any {
 			"target":          map[string]any{"position_x": targetX, "position_y": targetY, "width": config.TargetWidth},
 			"workspace":       map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "safeMinX": safeBounds.MinX, "safeMaxX": safeBounds.MaxX, "safeMinY": safeBounds.MinY, "safeMaxY": safeBounds.MaxY, "boundaryHit": boundaryHit, "coordinate_system_version": forcecontrol.CoordinateSystemVersion},
 			"workspace_min_x": config.Workspace.MinX, "workspace_max_x": config.Workspace.MaxX, "workspace_min_y": config.Workspace.MinY, "workspace_max_y": config.Workspace.MaxY,
-			"terrain":                map[string]any{"points": s.sceneConfig()["terrain"].(map[string]any)["points"]},
+			"terrain":                map[string]any{"points": terrainPoints},
 			"last_action":            map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "filtered_horizontal": selected.Info["filtered_action_horizontal"], "filtered_vertical": selected.Info["filtered_action_vertical"], "filtered_gripper": filteredForceRateCommand, "dead_zone_removed_horizontal": selected.Info["dead_zone_removed_horizontal"] > 0, "dead_zone_removed_vertical": selected.Info["dead_zone_removed_vertical"] > 0, "dead_zone_removed_gripper": selected.Info["dead_zone_removed_gripper"] > 0, "force_rate_command": forceRateCommand, "force_rate_newtons_per_second": float64(filteredForceRateCommand) * config.MaxGripForceRate, "force_action_mode": forceActionMode, "normalized_grip_force": lastAction[2]},
 			"control":                map[string]any{"dt": selected.Info["control_timestep"], "phase_numeric": selected.Info["phase_numeric"], "raw_horizontal_action": selected.Info["raw_action_horizontal"], "raw_vertical_action": selected.Info["raw_action_vertical"], "raw_gripper_action": selected.Info["raw_action_gripper"], "filtered_horizontal_action": selected.Info["filtered_action_horizontal"], "filtered_vertical_action": selected.Info["filtered_action_vertical"], "filtered_gripper_action": selected.Info["filtered_action_gripper"], "carriage_x": selected.Info["carriage_x"], "gripper_y": selected.Info["gripper_y"], "velocity_x": selected.Info["carriage_velocity_x"], "velocity_y": selected.Info["gripper_velocity_y"], "error_x": selected.Info["gripper_to_object_error_x"], "error_y": selected.Info["gripper_to_object_error_y"], "vertical_acceleration": selected.Info["vertical_acceleration"], "boundary_hit": selected.Info["boundary_hit"] > 0, "invalid_contact_frames": selected.Info["invalid_contact_frames"], "slip_severity": selected.Info["slip_severity"], "slip_frames": selected.Info["slip_frames"]},
 			"latest_vertical_action": lastAction[1], "velocity_y": denormalize(get(3), -config.MaxVerticalSpeed, config.MaxVerticalSpeed), "target_grasp_y": targetGraspY, "vertical_error": targetGraspY - gripperY,
 			"last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": selected.Info["gripper_to_object_distance"], "distance_to_target": selected.Info["object_to_target_distance"],
 			"contact_detected": contactDetected, "object_attached": objectAttached, "object_stable": selected.Info["object_stable"] > 0, "slipping": selected.Info["slipping"] > 0,
+			"contact_episode_successes": contactEpisodeSuccesses, "contact_episode_successes_required": contactEpisodeSuccessesRequired,
 			"homeostasis":     map[string]any{"energy": selected.Info["energy"], "delta": selected.Info["energy_delta"], "decay": selected.Info["energy_decay"], "food_gain": selected.Info["energy_food_gain"], "reward": selected.Info["homeostasis_reward"], "event": energyEvent},
 			"approach_reward": selected.Info["approach_reward"], "grip_reward": selected.Info["grip_reward"], "lift_reward": selected.Info["lift_reward"], "delivery_reward": selected.Info["delivery_reward"], "success_reward": selected.Info["success_reward"], "detached_force_penalty": selected.Info["detached_force_penalty"], "penalty_reward": selected.Info["penalty_reward"], "total_step_reward": selected.Info["total_step_reward"], "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome,
 		}

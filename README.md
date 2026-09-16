@@ -31,15 +31,16 @@ requires a released object to settle inside the target zone for the configured
 number of steps. Telemetry exposes contact, attachment, object state, and each
 reward component for diagnosis.
 
-The coordinate/action/reward schema is version 9. The force action is a
+The coordinate/action/reward/reset schema is version 11. The force action is a
 continuous policy-controlled actuator rate on every step; after attachment the
 environment reports slip feedback but never selects a grip-force target. The
-analytic required force is withheld from the default 22-value policy
+analytic required force is withheld from the default 23-value policy
 observation and is available only through an explicit privileged baseline flag.
 This learner currently has no
 checkpoint-loading path. Any future loader must call
 `forcecontrol.ValidateCheckpointSchema`; earlier policies and replay data must
-be discarded because they may contain exploitable reward transitions.
+be discarded because they may contain exploitable reward transitions or the
+old pre-aligned reset distribution.
 
 ## Local development
 
@@ -92,11 +93,28 @@ All stages retain the same continuous action contract: horizontal, vertical
 only reset distributions and verified terminal conditions; they do not issue
 robot actions for the policy.
 
-`align-and-contact` starts horizontally aligned and `0.30 m` above the
-reachable grasp guide by default. One real contact frame completes that novice
-lesson; the actor must still issue the negative vertical command. Configure
-`Curriculum.ContactStartHeightOffset` and `ContactStableSteps` when changing
-its difficulty.
+Every lesson starts with the open, detached gripper at `InitialCarriageX` and
+the object at its own scene position. The policy receives the object-relative
+observation and must issue both the horizontal approach and negative vertical
+command; no curriculum reset moves the carriage onto the object or attaches it.
+A contact is physically verified over
+`ContactStableSteps` frames, and automatic progression requires
+`ContactSuccessesRequired` consecutive successful contact **episodes** (three
+by default). A timeout or other failed episode resets that streak. Configure
+`ContactStableSteps` and `ContactSuccessesRequired` when changing its
+difficulty. Curriculum lessons use a 1,000-step horizon by default, including
+after a failure, so later milestones have enough time to repeat prerequisite
+skills without a scripted reset state.
+
+With `FORCE_CONTROL_CURRICULUM=auto`, every reset after the manually configured
+baseline varies object/target X, mass, friction, approach height, and terrain
+control-point heights from a deterministic per-worker seed. The object and
+target are then placed on that episode's physical terrain. The dashboard shows
+the active worker's terrain, not a static frontend copy. Pause the simulation
+to edit a scene; dragging the object changes only X because its resting Y is
+always derived from terrain. The **Review & Advance** button is a deliberate
+human curriculum override while paused; it does not award a reward or inject a
+successful replay transition.
 
 Open `http://127.0.0.1:8080`. The browser connects only to the Go process through `/api/*` and `/ws`; it never connects to Python directly.
 

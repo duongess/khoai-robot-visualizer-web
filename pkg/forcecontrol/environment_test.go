@@ -156,6 +156,7 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 
 func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX
 	config.InitialGripperY = GraspHeight(config, config.Terrain[1].Y+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	_, _ = task.Reset()
@@ -486,6 +487,7 @@ func TestEmptyGripperAtTargetCannotAttachEarnDeliveryOrSucceed(t *testing.T) {
 
 func TestInsufficientForceAndContactlessForceDoNotAttach(t *testing.T) {
 	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX
 	config.InitialGripperY = GraspHeight(config, config.Terrain[1].Y+config.ObjectHeight/2, config.InitialCarriageX)
 	near := NewTask(1, config)
 	_, _ = near.Reset()
@@ -750,16 +752,12 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if _, err := align.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if align.environment.state.Phase != PhaseLowerToObject || align.environment.state.CarriageX != align.environment.state.ObjectX || align.environment.state.GripperY <= align.environment.objectGripHeight() {
-		t.Fatalf("align curriculum did not initialize just above a reachable grasp guide: %#v", align.environment.state)
+	if align.environment.state.Phase != PhaseApproachObject || align.environment.state.Grip.ObjectAttached || math.Abs(align.environment.state.CarriageX-align.environment.state.ObjectX) <= alignConfig.HorizontalTolerance {
+		t.Fatalf("align curriculum did not begin with a detached horizontal approach: %#v", align.environment.state)
 	}
-	// The policy, rather than the curriculum, must command the remaining short
-	// physical descent before real contact can finish the lesson.
-	for step := 0; step < 20 && align.environment.state.Phase != PhaseSuccess; step++ {
-		if _, err := align.Step(framework.Action{0, -1, 0}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The policy, rather than the curriculum, must command both horizontal
+	// approach and descent before real contact can finish the lesson.
+	driveToContact(t, align)
 	if align.environment.state.Phase != PhaseSuccess {
 		t.Fatalf("align curriculum did not accept stable physical contact: %#v", align.environment.state)
 	}
@@ -770,8 +768,8 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if _, err := grasp.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if grasp.environment.state.Phase != PhaseGripObject || grasp.environment.state.Grip.ObjectAttached {
-		t.Fatalf("grasp curriculum must still require a learned attachment: %#v", grasp.environment.state)
+	if grasp.environment.state.Phase != PhaseApproachObject || grasp.environment.state.Grip.ObjectAttached {
+		t.Fatalf("grasp curriculum must begin detached and require a learned approach/attachment: %#v", grasp.environment.state)
 	}
 
 	liftConfig := DefaultConfig()
@@ -780,8 +778,8 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if _, err := lift.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if lift.environment.state.Phase != PhaseLiftObject || !lift.environment.state.Grip.ObjectAttached || !lift.environment.state.Grip.ForceValid {
-		t.Fatalf("lift curriculum did not initialize a physical attachment: %#v", lift.environment.state)
+	if lift.environment.state.Phase != PhaseApproachObject || lift.environment.state.Grip.ObjectAttached || lift.environment.state.Grip.ForceValid {
+		t.Fatalf("lift curriculum did not initialize a detached physical scene: %#v", lift.environment.state)
 	}
 
 	transportConfig := DefaultConfig()
@@ -790,8 +788,8 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if _, err := transport.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if transport.environment.state.Phase != PhaseMoveToTarget || !transport.environment.state.Grip.ObjectAttached || !transport.environment.state.Grip.ForceValid {
-		t.Fatalf("transport curriculum did not initialize a physical carried object: %#v", transport.environment.state)
+	if transport.environment.state.Phase != PhaseApproachObject || transport.environment.state.Grip.ObjectAttached || transport.environment.state.Grip.ForceValid {
+		t.Fatalf("transport curriculum did not initialize a detached physical scene: %#v", transport.environment.state)
 	}
 }
 
@@ -799,6 +797,9 @@ func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) 
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumAutomatic
 	config.Curriculum.ContactStableSteps = 1
+	// This test isolates the stage-transition mechanism. The default policy is
+	// intentionally stricter and requires three consecutive contact episodes.
+	config.Curriculum.ContactSuccessesRequired = 1
 	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
@@ -807,11 +808,7 @@ func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) 
 		t.Fatalf("automatic curriculum began at %q, want %q", got, CurriculumAlignAndContact)
 	}
 
-	for step := 0; step < 20 && task.environment.state.Phase != PhaseSuccess; step++ {
-		if _, err := task.Step(framework.Action{0, -1, 0}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	driveToContact(t, task)
 	if task.environment.state.Phase != PhaseSuccess {
 		t.Fatalf("automatic first lesson did not require verified physical contact: %#v", task.environment.state)
 	}
@@ -826,8 +823,221 @@ func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) 
 	if got := task.environment.currentCurriculumStage(); got != CurriculumGrasp {
 		t.Fatalf("automatic curriculum did not advance after success: got %q, want %q", got, CurriculumGrasp)
 	}
-	if task.environment.state.Phase != PhaseGripObject || task.environment.state.Grip.ObjectAttached {
-		t.Fatalf("grasp lesson must still require a policy-controlled attachment: %#v", task.environment.state)
+	if task.environment.state.Phase != PhaseApproachObject || task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("grasp lesson must reset to a policy-controlled detached approach: %#v", task.environment.state)
+	}
+}
+
+func TestAutomaticAlignRequiresThreeConsecutiveContactEpisodes(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAutomatic
+	config.Curriculum.ContactStableSteps = 1
+	config.Curriculum.ContactSuccessesRequired = 3
+	task := NewTask(19, config)
+
+	for episode := 1; episode <= 3; episode++ {
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		driveToContact(t, task)
+		if task.environment.state.Phase != PhaseSuccess {
+			t.Fatalf("episode %d did not reach physical contact: %#v", episode, task.environment.state)
+		}
+		if got := task.environment.contactSuccessStreak; got != episode {
+			t.Fatalf("episode %d contact streak = %d, want %d", episode, got, episode)
+		}
+		if episode < 3 && task.environment.advanceCurriculumOnReset {
+			t.Fatalf("episode %d advanced before three consecutive contacts", episode)
+		}
+	}
+	if !task.environment.advanceCurriculumOnReset {
+		t.Fatal("third consecutive contact did not schedule automatic progression")
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := task.environment.currentCurriculumStage(); got != CurriculumGrasp {
+		t.Fatalf("stage after third contact = %q, want %q", got, CurriculumGrasp)
+	}
+}
+
+// driveToContact is a deterministic test-only feedback script. It verifies
+// that the environment allows an externally chosen controller to approach the
+// observed object position and descend; production curriculum never uses it.
+func driveToContact(t *testing.T, task *Task) {
+	t.Helper()
+	for step := 0; step < 160 && task.environment.state.Phase != PhaseSuccess; step++ {
+		state := task.environment.state
+		deltaX := state.ObjectX - state.CarriageX
+		horizontal := clamp(2*deltaX-0.8*state.CarriageVelocityX, -1, 1)
+		vertical := 0.0
+		if math.Abs(deltaX) <= task.config.HorizontalTolerance/2 && math.Abs(state.CarriageVelocityX) <= task.config.StableVelocityThreshold*2 {
+			vertical = -1
+		}
+		if _, err := task.Step(framework.Action{float32(horizontal), float32(vertical), 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestFailureResetRestoresDetachedRandomizedScene(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumLift
+	config.Curriculum.Randomization.Enabled = true
+	task := NewTask(29, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	initialTerrain := append([]TerrainPoint(nil), task.environment.config.Terrain...)
+	task.environment.state.ObjectBroken = true
+	result, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Done || result.Outcome != OutcomeFailure {
+		t.Fatalf("forced failure did not terminate: %#v", result)
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	state := task.environment.state
+	if state.Phase != PhaseApproachObject || state.Grip.ObjectAttached || state.ObjectGrasped || state.GripForce != 0 || state.GripperOpening != 1 {
+		t.Fatalf("failure reset did not restore an open detached scene: %#v", state)
+	}
+	if math.Abs(state.CarriageX-state.ObjectX) <= config.HorizontalTolerance {
+		t.Fatalf("failure reset re-aligned carriage with object: %#v", state)
+	}
+	if math.Abs(state.ObjectY-(task.environment.terrainHeight(state.ObjectX)+config.ObjectHeight/2)) > 1e-9 {
+		t.Fatalf("failure reset embedded object in terrain: state=%#v terrain=%#v", state, task.environment.config.Terrain)
+	}
+	terrainChanged := false
+	for index := range initialTerrain {
+		if initialTerrain[index].Y != task.environment.config.Terrain[index].Y {
+			terrainChanged = true
+			break
+		}
+	}
+	if !terrainChanged {
+		t.Fatalf("failure reset did not resample terrain: before=%#v after=%#v", initialTerrain, task.environment.config.Terrain)
+	}
+}
+
+func TestCurriculumLessonsUseLongEpisodeHorizon(t *testing.T) {
+	for _, stage := range []CurriculumStage{
+		CurriculumAlignAndContact,
+		CurriculumGrasp,
+		CurriculumLift,
+		CurriculumTransportAndRelease,
+		CurriculumFullPickAndPlace,
+	} {
+		config := DefaultConfig()
+		config.Curriculum.Stage = stage
+		task := NewTask(31, config)
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		if got := task.environment.maxEpisodeSteps(); got != 1000 {
+			t.Fatalf("stage %q horizon = %d, want 1000", stage, got)
+		}
+	}
+}
+
+func TestAutomaticAlignResetOfUnfinishedEpisodeBreaksContactStreak(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAutomatic
+	task := NewTask(23, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.contactSuccessStreak = 2
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := task.environment.contactSuccessStreak; got != 0 {
+		t.Fatalf("reset unfinished episode retained contact streak %d", got)
+	}
+}
+
+func TestCurriculumRandomizationVariesResetsReproducibly(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAutomatic
+	config.Curriculum.Randomization.Enabled = true
+
+	first := NewTask(7, config)
+	if _, err := first.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	firstEpisode := first.environment.state
+	if firstEpisode.ObjectX != config.InitialObjectX || firstEpisode.TargetX != config.TargetX {
+		t.Fatalf("first randomized reset must preserve the manually configured baseline: %#v", firstEpisode)
+	}
+	if _, err := first.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	secondEpisode := first.environment.state
+	if firstEpisode.ObjectX == secondEpisode.ObjectX && firstEpisode.TargetX == secondEpisode.TargetX && firstEpisode.ObjectMass == secondEpisode.ObjectMass && firstEpisode.ObjectFriction == secondEpisode.ObjectFriction {
+		t.Fatalf("randomized curriculum reset did not vary the scene: first=%#v second=%#v", firstEpisode, secondEpisode)
+	}
+	if math.Abs(secondEpisode.ObjectY-(first.environment.terrainHeight(secondEpisode.ObjectX)+config.ObjectHeight/2)) > 1e-9 {
+		t.Fatalf("random terrain embedded object in ground: state=%#v terrain=%#v", secondEpisode, first.environment.config.Terrain)
+	}
+	terrainChanged := false
+	for index := range config.Terrain {
+		if first.environment.config.Terrain[index].Y != config.Terrain[index].Y {
+			terrainChanged = true
+			break
+		}
+	}
+	if !terrainChanged {
+		t.Fatalf("randomized curriculum reset did not vary terrain: %#v", first.environment.config.Terrain)
+	}
+
+	// The same task seed recreates the same sequence, which keeps failed runs
+	// debuggable while still exposing a variety of scenes across episodes.
+	replay := NewTask(7, config)
+	if _, err := replay.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	replayedFirst := replay.environment.state
+	if _, err := replay.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	replayedSecond := replay.environment.state
+	if firstEpisode.ObjectX != replayedFirst.ObjectX || firstEpisode.TargetX != replayedFirst.TargetX || secondEpisode.ObjectX != replayedSecond.ObjectX || secondEpisode.TargetX != replayedSecond.TargetX {
+		t.Fatalf("randomized reset sequence is not reproducible: first=%#v replay=%#v", firstEpisode, replayedFirst)
+	}
+	for index := range first.environment.config.Terrain {
+		if first.environment.config.Terrain[index] != replay.environment.config.Terrain[index] {
+			t.Fatalf("randomized terrain sequence is not reproducible: first=%#v replay=%#v", first.environment.config.Terrain, replay.environment.config.Terrain)
+		}
+	}
+}
+
+func TestManualCurriculumReviewAdvancesWithoutSyntheticSuccess(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAutomatic
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if err := task.ApproveCurriculumReview(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := task.environment.currentCurriculumStage(); got != CurriculumGrasp {
+		t.Fatalf("manual review stage = %q, want %q", got, CurriculumGrasp)
+	}
+	if task.environment.successRewardAwarded || task.environment.state.Phase == PhaseSuccess {
+		t.Fatalf("manual review manufactured a successful episode: %#v", task.environment.state)
+	}
+
+	fixed := DefaultConfig()
+	fixed.Curriculum.Stage = CurriculumGrasp
+	fixedTask := NewTask(1, fixed)
+	if err := fixedTask.ApproveCurriculumReview(); err == nil {
+		t.Fatal("manual review accepted a non-automatic curriculum")
 	}
 }
 

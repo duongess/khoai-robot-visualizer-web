@@ -267,6 +267,8 @@ export interface WorkerState {
 	object_attached?: boolean;
 	object_stable?: boolean;
 	slipping?: boolean;
+	contact_episode_successes?: number;
+	contact_episode_successes_required?: number;
 	homeostasis?: {
 		energy: number;
 		delta: number;

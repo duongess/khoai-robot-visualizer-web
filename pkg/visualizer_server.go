@@ -3,6 +3,7 @@ package pkg
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"sync"
@@ -64,6 +65,8 @@ func (s *APIServer) serveAPI(w http.ResponseWriter, r *http.Request) {
 		s.lifecycle(w, s.runtime.Reset)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/evaluation/approve":
 		s.approveCurriculumReview(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/api/model/save":
+		s.saveModel(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/simulation/stop":
 		s.runtime.Stop()
 		s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -105,6 +108,32 @@ func (s *APIServer) approveCurriculumReview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "worker_id": request.WorkerID, "note": "No synthetic reward or success transition was recorded."})
+}
+
+type saveModelRequest struct {
+	ModelName string `json:"model_name"`
+}
+
+// saveModel forwards a named, complete SAC checkpoint request to the local
+// learner. It intentionally remains available while the runtime is running:
+// the learner serializes a lock-consistent snapshot without resetting workers.
+func (s *APIServer) saveModel(w http.ResponseWriter, r *http.Request) {
+	var request saveModelRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		s.writeError(w, http.StatusBadRequest, "INVALID_MODEL_NAME", "The model save request must be valid JSON.")
+		return
+	}
+	result, err := s.runtime.SaveCheckpoint(r.Context(), request.ModelName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "MODEL_SAVE_REJECTED", err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status": "saved", "model_name": result.ModelName,
+		"policy_version": result.PolicyVersion, "training_step": result.TrainingStep,
+	})
 }
 
 type sceneUpdate struct {

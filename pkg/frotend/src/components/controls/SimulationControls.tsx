@@ -1,9 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useSimulationStore } from '../../lib/simulation-store';
-import { Play, Pause, RotateCw, RefreshCw, Layers, ShieldCheck, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { runtimeClient } from '../../lib/runtime-client';
+import { Play, Pause, RotateCw, RefreshCw, Layers, AlertTriangle, CheckCircle2, Save } from 'lucide-react';
 import { SimulationMode } from '../../types/simulation';
 
 export const SimulationControls: React.FC = () => {
+	const [modelName, setModelName] = useState('');
+	const [modelFeedback, setModelFeedback] = useState<string | null>(null);
+	const [savingModel, setSavingModel] = useState(false);
   const {
     runtimeStatus,
     selectedMode,
@@ -25,6 +29,23 @@ export const SimulationControls: React.FC = () => {
   const isPaused = runtimeStatus === 'paused';
   const isStopped = runtimeStatus === 'stopped';
   const isResetting = runtimeStatus === 'resetting';
+
+	const saveModel = async () => {
+		setSavingModel(true);
+		setModelFeedback(null);
+		try {
+			const result = await runtimeClient.command<{ model_name: string; policy_version: number; training_step: number }>(
+				'/api/model/save',
+				modelName.trim() ? { model_name: modelName.trim() } : undefined,
+			);
+			setModelName(result.model_name);
+			setModelFeedback(`Saved ${result.model_name} · policy v${result.policy_version}`);
+		} catch (error) {
+			setModelFeedback(error instanceof Error ? error.message : 'Could not save model.');
+		} finally {
+			setSavingModel(false);
+		}
+	};
 
   const statusBadge = {
     running: { label: 'Running', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', text: 'text-emerald-400', dot: 'bg-emerald-400' },
@@ -97,6 +118,36 @@ export const SimulationControls: React.FC = () => {
             <RefreshCw className={`w-4 h-4 ${isResetting ? 'animate-spin' : ''}`} />
             <span>Reset</span>
           </button>
+
+			<div className="flex items-center gap-1.5 ml-1">
+				<input
+					id="model-name-input"
+					value={modelName}
+					onChange={(event) => setModelName(event.target.value)}
+					placeholder="Model name"
+					title="Leave blank only to overwrite the model used to start this learner."
+					className="w-28 bg-slate-950 border border-slate-700 text-slate-200 placeholder:text-slate-600 text-xs font-mono rounded-md px-2.5 py-1.5 focus:outline-none focus:border-cyan-500"
+				/>
+				<button
+					id="control-save-model-btn"
+					onClick={() => void saveModel()}
+					disabled={savingModel}
+					title="Save a complete SAC checkpoint. A name creates or overwrites that model; blank overwrites the active named model."
+					className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+						savingModel
+							? 'bg-slate-800/40 text-slate-500 border-slate-800 cursor-wait'
+							: 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500'
+					}`}
+				>
+					<Save className="w-4 h-4" />
+					<span>{savingModel ? 'Saving…' : 'Save Model'}</span>
+				</button>
+			</div>
+			{modelFeedback && (
+				<span className={`text-[11px] font-mono ${modelFeedback.startsWith('Saved') ? 'text-emerald-400' : 'text-red-400'}`}>
+					{modelFeedback}
+				</span>
+			)}
 
 			<button
 				id="control-approve-curriculum-btn"

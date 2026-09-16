@@ -36,11 +36,12 @@ continuous policy-controlled actuator rate on every step; after attachment the
 environment reports slip feedback but never selects a grip-force target. The
 analytic required force is withheld from the default 23-value policy
 observation and is available only through an explicit privileged baseline flag.
-This learner currently has no
-checkpoint-loading path. Any future loader must call
-`forcecontrol.ValidateCheckpointSchema`; earlier policies and replay data must
-be discarded because they may contain exploitable reward transitions or the
-old pre-aligned reset distribution.
+SAC checkpoints are schema-aware at the learner level: a named checkpoint
+stores its observation/action dimensions and controller configuration, and is
+rejected if its saved SAC architecture does not match. Earlier policies and
+replay data from a different force-control schema must still be discarded
+because they may contain exploitable reward transitions or the old
+pre-aligned reset distribution.
 
 ## Local development
 
@@ -57,6 +58,24 @@ Start the learner in one terminal:
 cd khoai-robot-control-framework
 poetry run python -m ai
 ```
+
+To resume a named checkpoint, pass its name. If it does not exist yet, this
+starts a new named run; **Save Model** then creates it. If it already exists,
+the learner restores the actor, critics, target critics, optimizers, entropy
+temperature, RNG state, and learner counters before accepting Go workers.
+
+```bash
+cd khoai-robot-control-framework
+poetry run python -m ai grasp-v1
+```
+
+The **Save Model** control can be pressed during training. Enter a name to
+create or overwrite it; when the learner was started with a name, leaving the
+field empty overwrites that active named model. Files are atomically written
+to ignored `data/models/<name>.pt` by default (override with
+`LEARNER_CHECKPOINT_DIR`). The Go replay buffer is intentionally not saved, so
+after resuming start the dashboard afresh and do not mix stale transitions from
+a changed environment/reward schema.
 
 The dashboard is a training collector and therefore samples SAC actions for
 exploration. For a stable evaluation-only run, set

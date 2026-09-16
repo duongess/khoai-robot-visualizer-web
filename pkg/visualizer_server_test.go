@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -31,6 +32,12 @@ func (apiTestLearner) PredictBatch(_ context.Context, states []framework.State, 
 }
 func (apiTestLearner) TrainBatch(context.Context, []framework.Transition) (framework.TrainingResult, error) {
 	return framework.TrainingResult{}, nil
+}
+func (apiTestLearner) SaveCheckpoint(_ context.Context, modelName string) (framework.CheckpointResult, error) {
+	if modelName == "" {
+		return framework.CheckpointResult{}, errors.New("a model name is required")
+	}
+	return framework.CheckpointResult{ModelName: modelName, PolicyVersion: 7, TrainingStep: 8}, nil
 }
 func (apiTestLearner) Close() error { return nil }
 
@@ -150,5 +157,33 @@ func TestAPIServerAcceptsCanvasObjectIDAndLegacyTargetY(t *testing.T) {
 	}
 	if got := server.config.TargetX; got != 4.4 {
 		t.Fatalf("target x = %v, want 4.4", got)
+	}
+}
+
+func TestAPIServerSavesNamedModelWithoutPausingSimulation(t *testing.T) {
+	runtime := framework.NewRuntime()
+	config := forcecontrol.DefaultConfig()
+	if err := forcecontrol.Register(runtime, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Configure(framework.DefaultRuntimeConfig(), apiTestLearner{}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewAPIServer(runtime, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.NewBufferString(`{"model_name":"grasp-v1"}`)
+	recorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/model/save", body))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("save model status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["model_name"] != "grasp-v1" {
+		t.Fatalf("save model response=%#v", response)
 	}
 }

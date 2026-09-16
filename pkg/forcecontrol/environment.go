@@ -688,7 +688,11 @@ func (e *Environment) detectFailure(previous State) string {
 }
 
 func (e *Environment) maxEpisodeSteps() int {
-	if e.currentCurriculumStage() != CurriculumFullPickAndPlace && e.config.Curriculum.EpisodeStepLimit > 0 {
+	stage := e.currentCurriculumStage()
+	if stage == CurriculumAlignAndContact && e.config.Curriculum.AlignEpisodeStepLimit > 0 {
+		return e.config.Curriculum.AlignEpisodeStepLimit
+	}
+	if stage != CurriculumFullPickAndPlace && e.config.Curriculum.EpisodeStepLimit > 0 {
 		return e.config.Curriculum.EpisodeStepLimit
 	}
 	return e.config.MaxEpisodeSteps

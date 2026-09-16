@@ -102,9 +102,10 @@ A contact is physically verified over
 `ContactSuccessesRequired` consecutive successful contact **episodes** (three
 by default). A timeout or other failed episode resets that streak. Configure
 `ContactStableSteps` and `ContactSuccessesRequired` when changing its
-difficulty. Curriculum lessons use a 1,000-step horizon by default, including
-after a failure, so later milestones have enough time to repeat prerequisite
-skills without a scripted reset state.
+difficulty. `align-and-contact` uses a 250-step horizon by default so it
+resets/explores quickly; `grasp`, `lift`, `transport-and-release`, and the
+full task use 1,000 steps so later milestones have enough time to repeat
+prerequisite skills without a scripted reset state.
 
 With `FORCE_CONTROL_CURRICULUM=auto`, every reset after the manually configured
 baseline varies object/target X, mass, friction, approach height, and terrain

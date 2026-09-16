@@ -58,11 +58,11 @@ func (stage CurriculumStage) canonical() CurriculumStage {
 // CurriculumRandomization defines reproducible variation around the manually
 // configured scene. It is reset-distribution data, never a hidden controller.
 type CurriculumRandomization struct {
-	Enabled                  bool
-	ObjectXJitter            float64
-	TargetXJitter            float64
-	ObjectMassJitter         float64
-	ObjectFrictionJitter     float64
+	Enabled              bool
+	ObjectXJitter        float64
+	TargetXJitter        float64
+	ObjectMassJitter     float64
+	ObjectFrictionJitter float64
 	// ContactStartHeightJitter is retained for compatibility with existing
 	// configs; it now jitters the detached gripper's reset height rather than
 	// positioning the carriage above the object.
@@ -70,7 +70,7 @@ type CurriculumRandomization struct {
 	// TerrainHeightJitter independently varies each terrain control-point
 	// height on every randomized reset. X coordinates remain fixed so the
 	// piecewise-linear ground never becomes self-intersecting.
-	TerrainHeightJitter      float64
+	TerrainHeightJitter float64
 }
 
 // CurriculumConfig contains only task-distribution and verification settings.
@@ -86,6 +86,10 @@ type CurriculumConfig struct {
 	// physical frames within one episode.
 	ContactSuccessesRequired int
 	Randomization            CurriculumRandomization
+	// AlignEpisodeStepLimit is the short exploration horizon for the first
+	// lesson. Later lessons use EpisodeStepLimit so they have time to carry out
+	// approach, grasp, lift, and transport prerequisites.
+	AlignEpisodeStepLimit int
 	// EpisodeStepLimit applies only to a non-full curriculum stage when
 	// positive. Shorter stages must reset frequently enough to sample their
 	// narrow initial distribution instead of spending a full task horizon away
@@ -233,20 +237,20 @@ func DefaultConfig() Config {
 		// Deliberately independent from InitialObjectX. The controller observes
 		// the object-relative delta and must learn the horizontal approach; reset
 		// never moves the carriage onto the object on its behalf.
-		InitialCarriageX:          3.0,
-		InitialGripperY:           2.8,
-		TargetX:                   4.5,
-		TargetWidth:               0.8,
-		MaxEpisodeSteps:           1000,
-		HorizontalTolerance:       0.15,
-		VerticalTolerance:         0.10,
-		GraspHorizontalTolerance:  0.15,
-		GraspVerticalTolerance:    0.10,
-		ClosedOpeningThreshold:    0.35,
-		StableVelocityThreshold:   0.05,
-		StablePlacementSteps:      3,
-		LiftClearance:             0.60,
-		ReleaseTolerance:          0.08,
+		InitialCarriageX:         3.0,
+		InitialGripperY:          2.8,
+		TargetX:                  4.5,
+		TargetWidth:              0.8,
+		MaxEpisodeSteps:          1000,
+		HorizontalTolerance:      0.15,
+		VerticalTolerance:        0.10,
+		GraspHorizontalTolerance: 0.15,
+		GraspVerticalTolerance:   0.10,
+		ClosedOpeningThreshold:   0.35,
+		StableVelocityThreshold:  0.05,
+		StablePlacementSteps:     3,
+		LiftClearance:            0.60,
+		ReleaseTolerance:         0.08,
 		// A normalized SAC action of 0.03 was large enough to erase legitimate
 		// early descent commands (for example -0.004). Hardware still clamps all
 		// commands; this intentionally small, configurable dead zone only removes
@@ -269,8 +273,8 @@ func DefaultConfig() Config {
 			// A real contact needs only one settled physics frame within an
 			// episode, but automatic curriculum requires three consecutive contact
 			// episodes before proceeding to grasp.
-			ContactStableSteps: 1,
-			ContactSuccessesRequired: 3,
+			ContactStableSteps:       1,
+			ContactSuccessesRequired: 10,
 			// Disabled for the deterministic default scene. The demo turns this on
 			// for FORCE_CONTROL_CURRICULUM=auto, where every lesson benefits from
 			// varied but reproducible reset conditions.
@@ -282,13 +286,14 @@ func DefaultConfig() Config {
 				ContactStartHeightJitter: 0.15,
 				TerrainHeightJitter:      0.25,
 			},
-			// Every curriculum lesson gets enough horizon to carry out the
-			// prerequisite approach itself; no lesson receives a scripted grasp or
-			// attachment at reset.
-			EpisodeStepLimit:   1000,
+			// The first lesson resets quickly for efficient SAC exploration. Later
+			// lessons retain enough horizon to perform prerequisite skills without
+			// a scripted grasp or attachment at reset.
+			AlignEpisodeStepLimit: 250,
+			EpisodeStepLimit:      1000,
 		},
 		Reward: RewardConfig{
-			TimePenalty:                  -0.001,
+			TimePenalty: -0.001,
 			// The first learned subgoal is horizontal object approach. Signed
 			// distance progress dominates the small time cost, while movement away
 			// receives the equal negative term.

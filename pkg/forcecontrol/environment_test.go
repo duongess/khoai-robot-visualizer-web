@@ -924,7 +924,6 @@ func TestFailureResetRestoresDetachedRandomizedScene(t *testing.T) {
 
 func TestCurriculumLessonsUseLongEpisodeHorizon(t *testing.T) {
 	for _, stage := range []CurriculumStage{
-		CurriculumAlignAndContact,
 		CurriculumGrasp,
 		CurriculumLift,
 		CurriculumTransportAndRelease,
@@ -939,6 +938,15 @@ func TestCurriculumLessonsUseLongEpisodeHorizon(t *testing.T) {
 		if got := task.environment.maxEpisodeSteps(); got != 1000 {
 			t.Fatalf("stage %q horizon = %d, want 1000", stage, got)
 		}
+	}
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAlignAndContact
+	align := NewTask(31, config)
+	if _, err := align.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := align.environment.maxEpisodeSteps(); got != 250 {
+		t.Fatalf("align-and-contact horizon = %d, want 250", got)
 	}
 }
 

@@ -48,7 +48,7 @@ func main() {
 		log.Fatalf("register force-control task: %v", err)
 	}
 	runtimeConfig := framework.DefaultRuntimeConfig()
-	runtimeConfig.WorkerCount = 1
+	runtimeConfig.WorkerCount = 2
 
 	if err := runtime.Configure(runtimeConfig, learner); err != nil {
 		log.Fatalf("configure runtime: %v", err)

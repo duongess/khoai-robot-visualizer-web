@@ -71,6 +71,9 @@ export const PhysicsMetrics: React.FC = () => {
 	const actionSource = worker?.action_source ?? 'pending';
 	const contactEpisodeSuccesses = worker?.contact_episode_successes ?? 0;
 	const contactEpisodeSuccessesRequired = worker?.contact_episode_successes_required ?? 3;
+	const graspHoldFrames = worker?.grasp_hold_frames ?? 0;
+	const graspHoldFramesRequired = worker?.grasp_hold_frames_required ?? 1;
+	const controlTimeStep = worker?.control?.dt ?? 0.1;
 
   // Safety state evaluation according to Section 5 rules
   let forceState: 'stable' | 'slipping' | 'break_risk' = 'stable';
@@ -129,6 +132,11 @@ export const PhysicsMetrics: React.FC = () => {
 		  {curriculumStage === 'align-and-contact' && (
 			<p className="text-[9px] text-emerald-300 font-mono">
 			  verified contact episodes: {contactEpisodeSuccesses}/{contactEpisodeSuccessesRequired} consecutive
+			</p>
+		  )}
+		  {curriculumStage === 'grasp' && (
+			<p className="text-[9px] text-emerald-300 font-mono">
+			  secure hold: {(graspHoldFrames * controlTimeStep).toFixed(1)}/{(graspHoldFramesRequired * controlTimeStep).toFixed(1)} s continuous
 			</p>
 		  )}
         </div>

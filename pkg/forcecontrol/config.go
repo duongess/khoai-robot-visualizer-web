@@ -85,6 +85,11 @@ type CurriculumConfig struct {
 	// It is intentionally distinct from ContactStableSteps, which measures
 	// physical frames within one episode.
 	ContactSuccessesRequired int
+	// GraspHoldSeconds is the uninterrupted secure-hold duration required to
+	// complete the grasp lesson. It is converted to physics frames using the
+	// configured fixed TimeStep, so changing simulation speed does not silently
+	// make the lesson easier or harder.
+	GraspHoldSeconds float64
 	Randomization            CurriculumRandomization
 	// AlignEpisodeStepLimit is the short exploration horizon for the first
 	// lesson. Later lessons use EpisodeStepLimit so they have time to carry out
@@ -271,10 +276,13 @@ func DefaultConfig() Config {
 			Stage:                    CurriculumFullPickAndPlace,
 			ContactStartHeightOffset: 0.30,
 			// A real contact needs only one settled physics frame within an
-			// episode, but automatic curriculum requires three consecutive contact
+			// episode, but automatic curriculum requires consecutive contact
 			// episodes before proceeding to grasp.
 			ContactStableSteps:       1,
 			ContactSuccessesRequired: 10,
+			// The grasp lesson verifies that the learned policy can sustain a
+			// real, non-slipping attachment for half a minute before lift begins.
+			GraspHoldSeconds: 30,
 			// Disabled for the deterministic default scene. The demo turns this on
 			// for FORCE_CONTROL_CURRICULUM=auto, where every lesson benefits from
 			// varied but reproducible reset conditions.

@@ -793,6 +793,42 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	}
 }
 
+func TestGraspCurriculumRequiresContinuousSecureHold(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumGrasp
+	config.Curriculum.GraspHoldSeconds = 0.35 // four frames at the fixed 0.1 s timestep.
+	task := attachedTask(t, config)
+	environment := task.environment
+	requiredFrames := environment.requiredGraspHoldFrames()
+	if requiredFrames != 4 {
+		t.Fatalf("grasp hold frames = %d, want 4", requiredFrames)
+	}
+	if environment.state.Phase == PhaseSuccess || environment.secureGripHoldFrames >= requiredFrames {
+		t.Fatalf("one physical attachment completed the grasp lesson: phase=%s frames=%d", environment.state.Phase, environment.secureGripHoldFrames)
+	}
+
+	// A single slipping frame invalidates the entire uninterrupted interval.
+	environment.secureGripHoldFrames = requiredFrames - 1
+	environment.state.Phase = PhaseGripObject
+	environment.state.Grip.Slipping = true
+	environment.updatePhase(environment.state)
+	if environment.secureGripHoldFrames != 0 || environment.state.Phase == PhaseSuccess {
+		t.Fatalf("slipping did not reset grasp verification: phase=%s frames=%d", environment.state.Phase, environment.secureGripHoldFrames)
+	}
+
+	environment.state.Grip.Slipping = false
+	for frame := 1; frame < requiredFrames; frame++ {
+		environment.updatePhase(environment.state)
+		if environment.state.Phase == PhaseSuccess {
+			t.Fatalf("grasp succeeded after only %d/%d secure frames", frame, requiredFrames)
+		}
+	}
+	environment.updatePhase(environment.state)
+	if environment.state.Phase != PhaseSuccess {
+		t.Fatalf("grasp did not succeed after %d uninterrupted secure frames: %#v", requiredFrames, environment.state)
+	}
+}
+
 func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumAutomatic

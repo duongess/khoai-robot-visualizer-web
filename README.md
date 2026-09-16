@@ -99,10 +99,12 @@ observation and must issue both the horizontal approach and negative vertical
 command; no curriculum reset moves the carriage onto the object or attaches it.
 A contact is physically verified over
 `ContactStableSteps` frames, and automatic progression requires
-`ContactSuccessesRequired` consecutive successful contact **episodes** (three
-by default). A timeout or other failed episode resets that streak. Configure
-`ContactStableSteps` and `ContactSuccessesRequired` when changing its
-difficulty. `align-and-contact` uses a 250-step horizon by default so it
+`ContactSuccessesRequired` consecutive successful contact **episodes** (ten
+by default). A timeout or other failed episode resets that streak. The `grasp`
+lesson then requires a secure, non-slipping attachment for
+`GraspHoldSeconds` (30 seconds by default) without interruption; a detach or
+slip restarts that timer. Configure these verification settings when changing
+its difficulty. `align-and-contact` uses a 250-step horizon by default so it
 resets/explores quickly; `grasp`, `lift`, `transport-and-release`, and the
 full task use 1,000 steps so later milestones have enough time to repeat
 prerequisite skills without a scripted reset state.

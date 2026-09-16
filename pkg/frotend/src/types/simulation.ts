@@ -269,6 +269,8 @@ export interface WorkerState {
 	slipping?: boolean;
 	contact_episode_successes?: number;
 	contact_episode_successes_required?: number;
+	grasp_hold_frames?: number;
+	grasp_hold_frames_required?: number;
 	homeostasis?: {
 		energy: number;
 		delta: number;

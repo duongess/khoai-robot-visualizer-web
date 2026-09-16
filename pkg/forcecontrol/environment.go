@@ -179,6 +179,7 @@ type Environment struct {
 	lastEnergyFoodGain             float64
 	lastEnergyEvent                energyEvent
 	contactStableFrames            int
+	secureGripHoldFrames           int
 	contactSuccessStreak           int
 	activeCurriculumStage          CurriculumStage
 	advanceCurriculumOnReset       bool
@@ -268,6 +269,7 @@ func (e *Environment) reset() State {
 	e.lastEnergyFoodGain = 0
 	e.lastEnergyEvent = energyEventNone
 	e.contactStableFrames = 0
+	e.secureGripHoldFrames = 0
 	e.applyCurriculumReset()
 	e.resetCount++
 	e.ready = true
@@ -700,8 +702,21 @@ func (e *Environment) maxEpisodeSteps() int {
 
 func (e *Environment) updatePhase(previous State) {
 	stage := e.currentCurriculumStage()
-	if stage == CurriculumGrasp && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping {
-		e.state.Phase = PhaseSuccess
+	if stage == CurriculumGrasp {
+		// A transient attachment is not a learned grasp skill. Count only an
+		// uninterrupted secure hold; any detach or slip restarts verification.
+		// Before attachment, retain the ordinary approach/lower/grip phase
+		// transitions so the policy is still taught how to reach the object.
+		if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping {
+			e.state.Phase = PhaseGripObject
+			e.secureGripHoldFrames++
+		} else {
+			e.secureGripHoldFrames = 0
+			e.updateStandardPhase(previous)
+		}
+		if e.secureGripHoldFrames >= e.requiredGraspHoldFrames() {
+			e.state.Phase = PhaseSuccess
+		}
 		return
 	}
 	if stage == CurriculumLift && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
@@ -723,6 +738,10 @@ func (e *Environment) updatePhase(previous State) {
 		return
 	}
 	e.updateStandardPhase(previous)
+}
+
+func (e *Environment) requiredGraspHoldFrames() int {
+	return int(math.Ceil(e.config.Curriculum.GraspHoldSeconds / e.config.TimeStep))
 }
 
 func (e *Environment) updateStandardPhase(previous State) {

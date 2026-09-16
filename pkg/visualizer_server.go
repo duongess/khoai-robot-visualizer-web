@@ -230,7 +230,7 @@ func (s *APIServer) sceneConfig() map[string]any {
 		points[i] = terrainPoint{ID: "terrain-" + string(rune('1'+i)), X: point.X, Y: point.Y}
 	}
 	bounds := forcecontrol.SafeGripperBounds(config, config.InitialCarriageX)
-	return map[string]any{"workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "object": map[string]any{"id": "object-1", "position_x": config.InitialObjectX, "position_y": terrainAt(config, config.InitialObjectX) + config.ObjectHeight/2, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": config.ObjectBreakForce, "initial_vertical_velocity": 0, "width": config.ObjectWidth, "height": config.ObjectHeight}, "gantry": map[string]any{"rail_y": config.RailY, "carriage_x": config.InitialCarriageX, "gripper_y": config.InitialGripperY, "min_x": bounds.MinX, "max_x": bounds.MaxX, "min_y": bounds.MinY, "max_y": bounds.MaxY, "initial_grip_force": 0, "minimum_grip_force": 0, "maximum_grip_force": config.MaxGripForce}, "terrain": map[string]any{"points": points, "ground_friction": config.ObjectFriction, "gravity": config.Gravity}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}, "curriculum": map[string]any{"stage": config.Curriculum.Stage, "contact_start_height_offset": config.Curriculum.ContactStartHeightOffset, "contact_stable_steps": config.Curriculum.ContactStableSteps, "contact_successes_required": config.Curriculum.ContactSuccessesRequired, "randomization": config.Curriculum.Randomization, "align_episode_step_limit": config.Curriculum.AlignEpisodeStepLimit, "episode_step_limit": config.Curriculum.EpisodeStepLimit}}
+	return map[string]any{"workspace": map[string]any{"minX": config.Workspace.MinX, "maxX": config.Workspace.MaxX, "minY": config.Workspace.MinY, "maxY": config.Workspace.MaxY, "coordinate_system_version": forcecontrol.CoordinateSystemVersion}, "object": map[string]any{"id": "object-1", "position_x": config.InitialObjectX, "position_y": terrainAt(config, config.InitialObjectX) + config.ObjectHeight/2, "mass": config.InitialObjectMass, "friction": config.ObjectFriction, "break_force": config.ObjectBreakForce, "initial_vertical_velocity": 0, "width": config.ObjectWidth, "height": config.ObjectHeight}, "gantry": map[string]any{"rail_y": config.RailY, "carriage_x": config.InitialCarriageX, "gripper_y": config.InitialGripperY, "min_x": bounds.MinX, "max_x": bounds.MaxX, "min_y": bounds.MinY, "max_y": bounds.MaxY, "initial_grip_force": 0, "minimum_grip_force": 0, "maximum_grip_force": config.MaxGripForce}, "terrain": map[string]any{"points": points, "ground_friction": config.ObjectFriction, "gravity": config.Gravity}, "target": map[string]any{"position_x": config.TargetX, "width": config.TargetWidth}, "curriculum": map[string]any{"stage": config.Curriculum.Stage, "contact_start_height_offset": config.Curriculum.ContactStartHeightOffset, "contact_stable_steps": config.Curriculum.ContactStableSteps, "contact_successes_required": config.Curriculum.ContactSuccessesRequired, "grasp_hold_seconds": config.Curriculum.GraspHoldSeconds, "randomization": config.Curriculum.Randomization, "align_episode_step_limit": config.Curriculum.AlignEpisodeStepLimit, "episode_step_limit": config.Curriculum.EpisodeStepLimit}}
 }
 
 func (s *APIServer) telemetry() map[string]any {
@@ -245,11 +245,19 @@ func (s *APIServer) telemetry() map[string]any {
 		terrainPoints := s.sceneConfig()["terrain"].(map[string]any)["points"]
 		contactEpisodeSuccesses := float64(selected.Info["curriculum_contact_success_streak"])
 		contactEpisodeSuccessesRequired := float64(selected.Info["curriculum_contact_successes_required"])
+		graspHoldFrames := float64(selected.Info["curriculum_grasp_hold_frames"])
+		graspHoldFramesRequired := float64(selected.Info["curriculum_grasp_hold_frames_required"])
 		if value, ok := selected.Metadata["curriculum_contact_success_streak"].(int); ok {
 			contactEpisodeSuccesses = float64(value)
 		}
 		if value, ok := selected.Metadata["curriculum_contact_successes_required"].(int); ok {
 			contactEpisodeSuccessesRequired = float64(value)
+		}
+		if value, ok := selected.Metadata["curriculum_grasp_hold_frames"].(int); ok {
+			graspHoldFrames = float64(value)
+		}
+		if value, ok := selected.Metadata["curriculum_grasp_hold_frames_required"].(int); ok {
+			graspHoldFramesRequired = float64(value)
 		}
 		if points, ok := selected.Metadata["terrain_points"].([]forcecontrol.TerrainPoint); ok && len(points) >= 2 {
 			runtimeConfig.Terrain = append([]forcecontrol.TerrainPoint(nil), points...)
@@ -313,6 +321,7 @@ func (s *APIServer) telemetry() map[string]any {
 			"last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": selected.Info["gripper_to_object_distance"], "distance_to_target": selected.Info["object_to_target_distance"],
 			"contact_detected": contactDetected, "object_attached": objectAttached, "object_stable": selected.Info["object_stable"] > 0, "slipping": selected.Info["slipping"] > 0,
 			"contact_episode_successes": contactEpisodeSuccesses, "contact_episode_successes_required": contactEpisodeSuccessesRequired,
+			"grasp_hold_frames": graspHoldFrames, "grasp_hold_frames_required": graspHoldFramesRequired,
 			"homeostasis":     map[string]any{"energy": selected.Info["energy"], "delta": selected.Info["energy_delta"], "decay": selected.Info["energy_decay"], "food_gain": selected.Info["energy_food_gain"], "reward": selected.Info["homeostasis_reward"], "event": energyEvent},
 			"approach_reward": selected.Info["approach_reward"], "grip_reward": selected.Info["grip_reward"], "lift_reward": selected.Info["lift_reward"], "delivery_reward": selected.Info["delivery_reward"], "success_reward": selected.Info["success_reward"], "detached_force_penalty": selected.Info["detached_force_penalty"], "penalty_reward": selected.Info["penalty_reward"], "total_step_reward": selected.Info["total_step_reward"], "done": selected.Outcome != framework.OutcomeRunning, "outcome": selected.Outcome,
 		}

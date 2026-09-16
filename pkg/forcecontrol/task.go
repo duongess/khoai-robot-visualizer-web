@@ -63,6 +63,8 @@ func (t *Task) TelemetryMetadata() map[string]any {
 		"terrain_points":                    terrain,
 		"curriculum_contact_success_streak": t.environment.contactSuccessStreak,
 		"curriculum_contact_successes_required": t.config.Curriculum.ContactSuccessesRequired,
+		"curriculum_grasp_hold_frames":      t.environment.secureGripHoldFrames,
+		"curriculum_grasp_hold_frames_required": t.environment.requiredGraspHoldFrames(),
 	}
 }
 
@@ -91,6 +93,8 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"curriculum_stage_code":        float32(t.environment.curriculumStageCode()),
 		"curriculum_contact_success_streak": float32(t.environment.contactSuccessStreak),
 		"curriculum_contact_successes_required": float32(t.config.Curriculum.ContactSuccessesRequired),
+		"curriculum_grasp_hold_frames":      float32(t.environment.secureGripHoldFrames),
+		"curriculum_grasp_hold_frames_required": float32(t.environment.requiredGraspHoldFrames()),
 		"failure_reason_code":          float32(t.environment.failureReasonCode()),
 		"episode_step":                 float32(state.EpisodeStep),
 		"energy":                       float32(state.Energy),

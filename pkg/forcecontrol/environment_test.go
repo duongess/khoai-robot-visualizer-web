@@ -592,6 +592,16 @@ func TestExcessForceAndAbruptForceChangesArePenalized(t *testing.T) {
 	if highResult.Reward >= lowResult.Reward {
 		t.Fatalf("excess force was not less rewarding: low=%v high=%v", lowResult.Reward, highResult.Reward)
 	}
+	nearBreak := attachedTask(t, DefaultConfig())
+	usableBand := nearBreak.environment.state.ObjectBreakForce - nearBreak.environment.requiredForce()
+	nearBreak.environment.state.GripForce = nearBreak.environment.requiredForce() + 0.9*usableBand
+	nearBreakResult, err := nearBreak.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nearBreakResult.Info["break_risk_penalty"] >= 0 || nearBreakResult.Reward >= highResult.Reward {
+		t.Fatalf("near-break force was not immediately less rewarding: near=%#v high=%#v", nearBreakResult.Info, highResult.Info)
+	}
 	changed, err := low.Step(framework.Action{0, 0, 1})
 	if err != nil {
 		t.Fatal(err)
@@ -741,6 +751,87 @@ func TestDeadZoneReportsSuppressedCommandsAndKeepsCommandsAboveThreshold(t *test
 	}
 	if above.Info["filtered_action_vertical"] >= 0 || above.Info["dead_zone_removed_vertical"] != 0 || task.environment.state.GripperY >= config.InitialGripperY {
 		t.Fatalf("above-dead-zone descent did not reach physics: state=%#v info=%#v", task.environment.state, above.Info)
+	}
+}
+
+func TestLoweringPhaseRewardsDescentAndPenalizesHorizontalDithering(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX
+	config.InitialGripperY = 2
+	config.ActionSmoothingAlpha = 1
+
+	hover := NewTask(1, config)
+	if _, err := hover.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	hover.environment.state.Phase = PhaseLowerToObject
+	hoverResult, err := hover.Step(framework.Action{0.2, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hoverResult.Info["approach_reward"] != 0 || hoverResult.Info["penalty_reward"] > float32(config.Reward.LowerStallPenalty) {
+		t.Fatalf("horizontal dithering was rewarded or escaped the lower stall penalty: %#v", hoverResult.Info)
+	}
+
+	descend := NewTask(1, config)
+	if _, err := descend.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	descend.environment.state.Phase = PhaseLowerToObject
+	descendResult, err := descend.Step(framework.Action{0, -1, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descendResult.Info["approach_reward"] <= 0 || descendResult.Reward <= hoverResult.Reward {
+		t.Fatalf("descent must be preferred to horizontal dithering: descend=%#v hover=%#v", descendResult.Info, hoverResult.Info)
+	}
+}
+
+func TestApproachPhaseRequiresHorizontalProgressBeforeDescent(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.Workspace.MinX + 0.5
+	config.InitialGripperY = 2
+	config.ActionSmoothingAlpha = 1
+
+	wrongAxis := NewTask(1, config)
+	if _, err := wrongAxis.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	wrongAxis.environment.state.Phase = PhaseApproachObject
+	wrongAxisResult, err := wrongAxis.Step(framework.Action{0, -1, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrongAxisResult.Info["approach_reward"] != 0 || wrongAxisResult.Info["penalty_reward"] > float32(config.Reward.ApproachStallPenalty) {
+		t.Fatalf("descent away from the object escaped approach-stall scoring: %#v", wrongAxisResult.Info)
+	}
+
+	towardObject := NewTask(1, config)
+	if _, err := towardObject.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	towardObject.environment.state.Phase = PhaseApproachObject
+	towardResult, err := towardObject.Step(framework.Action{1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if towardResult.Info["approach_reward"] <= 0 || towardResult.Reward <= wrongAxisResult.Reward {
+		t.Fatalf("horizontal approach must be preferred to wrong-axis descent: toward=%#v wrong-axis=%#v", towardResult.Info, wrongAxisResult.Info)
+	}
+}
+
+func TestGraspHoldRewardRequiresSecureAttachment(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumGrasp
+	config.Curriculum.GraspHoldSeconds = 30
+	task := attachedTask(t, config)
+	result, err := task.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimumHoldReward := config.Reward.AttachedForceStabilityReward + config.Reward.GraspHoldRewardPerSecond*config.TimeStep
+	if !task.environment.state.Grip.ObjectAttached || task.environment.state.Grip.Slipping || float64(result.Info["grip_reward"])+1e-6 < minimumHoldReward {
+		t.Fatalf("secure hold did not receive time-scaled reward: state=%#v info=%#v", task.environment.state.Grip, result.Info)
 	}
 }
 

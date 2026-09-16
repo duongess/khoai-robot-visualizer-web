@@ -120,6 +120,10 @@ type RewardConfig struct {
 	GripForceChangePenaltyScale  float64
 	SlipPenalty                  float64
 	ExcessGripForcePenaltyScale  float64
+	// NearBreakForcePenaltyScale is a quadratic force barrier within the safe
+	// band. It makes approaching break force costly before the terminal damage
+	// event, rather than relying on a delayed discounted failure signal.
+	NearBreakForcePenaltyScale   float64
 	AttachedForceStabilityReward float64
 	InvalidGripPenalty           float64
 	EmptyGripStepPenalty         float64
@@ -129,6 +133,19 @@ type RewardConfig struct {
 	DroppedObjectPenalty         float64
 	BoundaryCollisionPenalty     float64
 	LowerProgressScale           float64
+	// LowerStallPenalty applies only while the carriage is horizontally
+	// aligned in the lowering phase but fails to reduce its vertical grasp
+	// error. It prevents X-axis dithering from being a cheap alternative to
+	// attempting the learned descent.
+	LowerStallPenalty            float64
+	// ApproachStallPenalty applies while the object remains horizontally out of
+	// reach and the policy fails to reduce that X error. Descending at the wrong
+	// X coordinate therefore cannot replace a real approach.
+	ApproachStallPenalty         float64
+	// GraspHoldRewardPerSecond is dense positive feedback for sustaining a
+	// secure physical attachment during the grasp lesson. It is time-scaled in
+	// the environment so it remains stable if TimeStep changes.
+	GraspHoldRewardPerSecond     float64
 }
 
 // WorkspaceBounds is the authoritative physical coordinate system. World Y is
@@ -320,6 +337,7 @@ func DefaultConfig() Config {
 			GripForceChangePenaltyScale:  0.02,
 			SlipPenalty:                  -1.0,
 			ExcessGripForcePenaltyScale:  0.05,
+			NearBreakForcePenaltyScale:   1.50,
 			AttachedForceStabilityReward: 0.02,
 			InvalidGripPenalty:           -1.0,
 			EmptyGripStepPenalty:         -0.01,
@@ -334,6 +352,15 @@ func DefaultConfig() Config {
 			// than a distant terminal placement reward. This is still signed
 			// progress, so upward/away motion is penalized symmetrically.
 			LowerProgressScale: 3.0,
+			// Once aligned over the object, lateral motion without vertical
+			// progress must not be safer than attempting a grasp.
+			LowerStallPenalty: -0.02,
+			// While still horizontally out of reach, lowering alone is not useful
+			// progress and must not be a cheap way to wait out an episode.
+			ApproachStallPenalty: -0.02,
+			// Thirty seconds of a secure hold earns 4.5 reward in addition to the
+			// one-time grip and final lesson-success rewards.
+			GraspHoldRewardPerSecond: 0.15,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},
 	}

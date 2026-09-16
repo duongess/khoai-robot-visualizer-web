@@ -60,6 +60,9 @@ func validateRegistration(runtime *framework.Runtime, config Config) error {
 	if config.ObjectBreakForce > config.MaxGripForce {
 		return errors.New("force-control configuration has no safe closed-grip force interval")
 	}
+	if math.IsNaN(config.Reward.LowerStallPenalty) || math.IsInf(config.Reward.LowerStallPenalty, 0) || config.Reward.LowerStallPenalty > 0 || math.IsNaN(config.Reward.ApproachStallPenalty) || math.IsInf(config.Reward.ApproachStallPenalty, 0) || config.Reward.ApproachStallPenalty > 0 || math.IsNaN(config.Reward.GraspHoldRewardPerSecond) || math.IsInf(config.Reward.GraspHoldRewardPerSecond, 0) || config.Reward.GraspHoldRewardPerSecond < 0 || math.IsNaN(config.Reward.NearBreakForcePenaltyScale) || math.IsInf(config.Reward.NearBreakForcePenaltyScale, 0) || config.Reward.NearBreakForcePenaltyScale < 0 {
+		return errors.New("force-control grasp rewards and safety-barrier terms must be finite with safe signs")
+	}
 	for _, value := range []float64{config.Homeostasis.InitialEnergy, config.Homeostasis.EnergyDecayPerStep, config.Homeostasis.SecureGripEnergyGain, config.Homeostasis.LiftEnergyGain, config.Homeostasis.DeliveryEnergyGain, config.Homeostasis.SuccessfulPlacementEnergyGain, config.Homeostasis.UnsafeDropEnergyLoss, config.Homeostasis.BreakEnergyLoss} {
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
 			return errors.New("force-control homeostasis configuration must use finite non-negative gains/losses and initial energy in [0, 1]")

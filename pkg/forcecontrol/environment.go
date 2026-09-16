@@ -61,6 +61,7 @@ type RewardBreakdown struct {
 	Success     float64
 	Homeostasis float64
 	DetachedForce  float64
+	BreakRisk     float64
 	Penalty     float64
 	Total       float64
 }
@@ -795,15 +796,29 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 		previousHorizontal := math.Abs(previous.CarriageX - previous.ObjectX)
 		currentHorizontal := math.Abs(e.state.CarriageX - e.state.ObjectX)
 		breakdown.Approach = e.config.Reward.ApproachProgressScale * (previousHorizontal - currentHorizontal)
+		if previousHorizontal > e.config.HorizontalTolerance && currentHorizontal >= previousHorizontal-1e-6 {
+			breakdown.Penalty += e.config.Reward.ApproachStallPenalty
+		}
 	}
 	if previous.Phase == PhaseLowerToObject && !attached {
-		previousError := e.graspPoseDistanceFor(previous)
-		currentError := e.graspPoseDistanceFor(e.state)
+		// Horizontal alignment is already the entry condition for this phase.
+		// Score only the remaining vertical grasp error, otherwise small X-axis
+		// dithering can masquerade as progress while the gripper stays high.
+		previousError := e.loweringErrorFor(previous)
+		currentError := e.loweringErrorFor(e.state)
 		breakdown.Approach = e.config.Reward.LowerProgressScale * (previousError - currentError)
+		if currentError >= previousError-1e-6 {
+			breakdown.Penalty += e.config.Reward.LowerStallPenalty
+		}
 	}
 	if attached && !e.gripBonusAwarded {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
+	}
+	if e.currentCurriculumStage() == CurriculumGrasp && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
+		// The actor, not a scripted force controller, must keep this condition
+		// true. Time scaling keeps the signal equivalent across fixed timesteps.
+		breakdown.Grip += e.config.Reward.GraspHoldRewardPerSecond * e.config.TimeStep
 	}
 	if previous.Phase == PhaseLiftObject && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
 		breakdown.Lift = e.config.Reward.LiftProgressScale * (e.state.ObjectY - previous.ObjectY)
@@ -821,6 +836,10 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 		} else if e.state.Grip.ForceValid {
 			breakdown.Grip += e.config.Reward.AttachedForceStabilityReward
 			breakdown.Penalty -= e.config.Reward.ExcessGripForcePenaltyScale * math.Max(0, e.state.GripForce-e.requiredForce())
+			usableBand := math.Max(e.state.ObjectBreakForce-e.requiredForce(), 1e-9)
+			risk := clamp((e.state.GripForce-e.requiredForce())/usableBand, 0, 1)
+			breakdown.BreakRisk = -e.config.Reward.NearBreakForcePenaltyScale * risk * risk
+			breakdown.Penalty += breakdown.BreakRisk
 		}
 	}
 	if e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected && !e.invalidGripPenaltyAwarded {
@@ -843,10 +862,10 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 		breakdown.DetachedForce = e.config.Reward.DetachedExcessForcePenalty * ratio * ratio
 		breakdown.Penalty += breakdown.DetachedForce
 	}
-	// Progress shaping rewards useful approach/lowering motion. A small cost for
-	// no physical movement in those phases removes the otherwise nearly-free
-	// hover policy without selecting a direction on the policy's behalf.
-	if !attached && (previous.Phase == PhaseApproachObject || previous.Phase == PhaseLowerToObject) &&
+	// Exact idling in the horizontal approach phase remains costly. The lowering
+	// phase has the stricter vertical-progress penalty above, so X motion cannot
+	// avoid it.
+	if !attached && previous.Phase == PhaseApproachObject &&
 		math.Abs(e.state.CarriageX-previous.CarriageX) < 1e-9 && math.Abs(e.state.GripperY-previous.GripperY) < 1e-9 {
 		breakdown.Penalty += e.config.Reward.InactivityPenalty
 	}
@@ -1033,6 +1052,10 @@ func (e *Environment) targetReleaseGuideHeight() float64 {
 }
 func (e *Environment) graspPoseDistanceFor(state State) float64 {
 	return math.Hypot(state.CarriageX-state.ObjectX, state.GripperY-e.objectGripHeightFor(state))
+}
+
+func (e *Environment) loweringErrorFor(state State) float64 {
+	return math.Abs(state.GripperY - e.objectGripHeightFor(state))
 }
 
 func (e *Environment) requiredCarryHeight() float64 {

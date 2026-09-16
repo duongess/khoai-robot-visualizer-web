@@ -132,6 +132,7 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"success_reward":               float32(breakdown.Success),
 		"homeostasis_reward":           float32(breakdown.Homeostasis),
 		"detached_force_penalty":       float32(breakdown.DetachedForce),
+		"break_risk_penalty":           float32(breakdown.BreakRisk),
 		"penalty_reward":               float32(breakdown.Penalty),
 		"total_step_reward":            float32(breakdown.Total),
 	}

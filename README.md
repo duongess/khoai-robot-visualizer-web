@@ -109,6 +109,11 @@ resets/explores quickly; `grasp`, `lift`, `transport-and-release`, and the
 full task use 1,000 steps so later milestones have enough time to repeat
 prerequisite skills without a scripted reset state.
 
+The learner should use `LEARNER_GAMMA=0.999` for this 0.1-second control loop:
+it preserves the future consequence of a break across the 30-second hold
+lesson. The force reward also includes a quadratic near-break barrier, so the
+policy receives a negative signal before it damages a contacted object.
+
 With `FORCE_CONTROL_CURRICULUM=auto`, every reset after the manually configured
 baseline varies object/target X, mass, friction, approach height, and terrain
 control-point heights from a deterministic per-worker seed. The object and

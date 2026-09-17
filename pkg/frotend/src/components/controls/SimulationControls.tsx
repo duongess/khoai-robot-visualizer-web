@@ -5,7 +5,6 @@ import { Play, Pause, RotateCw, RefreshCw, Layers, AlertTriangle, CheckCircle2, 
 import { SimulationMode } from '../../types/simulation';
 
 export const SimulationControls: React.FC = () => {
-	const [modelName, setModelName] = useState('');
 	const [modelFeedback, setModelFeedback] = useState<string | null>(null);
 	const [savingModel, setSavingModel] = useState(false);
   const {
@@ -36,9 +35,7 @@ export const SimulationControls: React.FC = () => {
 		try {
 			const result = await runtimeClient.command<{ model_name: string; policy_version: number; training_step: number }>(
 				'/api/model/save',
-				modelName.trim() ? { model_name: modelName.trim() } : undefined,
 			);
-			setModelName(result.model_name);
 			setModelFeedback(`Saved ${result.model_name} · policy v${result.policy_version}`);
 		} catch (error) {
 			setModelFeedback(error instanceof Error ? error.message : 'Could not save model.');
@@ -120,14 +117,6 @@ export const SimulationControls: React.FC = () => {
           </button>
 
 			<div className="flex items-center gap-1.5 ml-1">
-				<input
-					id="model-name-input"
-					value={modelName}
-					onChange={(event) => setModelName(event.target.value)}
-					placeholder="Model name"
-					title="Leave blank only to overwrite the model used to start this learner."
-					className="w-28 bg-slate-950 border border-slate-700 text-slate-200 placeholder:text-slate-600 text-xs font-mono rounded-md px-2.5 py-1.5 focus:outline-none focus:border-cyan-500"
-				/>
 				<button
 					id="control-save-model-btn"
 					onClick={() => void saveModel()}

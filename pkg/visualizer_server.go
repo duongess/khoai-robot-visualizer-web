@@ -125,7 +125,7 @@ func (s *APIServer) saveModel(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "INVALID_MODEL_NAME", "The model save request must be valid JSON.")
 		return
 	}
-	result, err := s.runtime.SaveCheckpoint(r.Context(), request.ModelName)
+	result, err := s.runtime.SaveCheckpoint(r.Context())
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "MODEL_SAVE_REJECTED", err.Error())
 		return
@@ -144,7 +144,7 @@ type sceneUpdate struct {
 	} `json:"gantry"`
 	Target *struct {
 		Position struct {
-			X float64  `json:"x"`
+			X float64 `json:"x"`
 			// Target Y is accepted for backwards-compatible scene payloads, but
 			// placement height is derived from the authoritative terrain.
 			Y *float64 `json:"y"`

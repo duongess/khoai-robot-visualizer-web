@@ -13,7 +13,7 @@ const ObservationDimension = 23
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 11
+const CoordinateSystemVersion = 12
 
 const (
 	observationGripperX = iota
@@ -55,6 +55,7 @@ type GripState struct {
 // be diagnosed without reverse engineering a scalar reward from telemetry.
 type RewardBreakdown struct {
 	Approach    float64
+	Contact     float64
 	Grip        float64
 	Lift        float64
 	Delivery    float64
@@ -277,12 +278,40 @@ func (e *Environment) reset() State {
 	return e.state
 }
 
-// applyCurriculumReset keeps every lesson physically fresh. Curriculum only
-// changes the terminal milestone; it does not align the carriage, lower the
-// gripper, or create an attachment. This makes a successful horizontal
-// approach attributable to the policy's object-relative observation.
+// applyCurriculumReset keeps every lesson physically fresh. The first lesson
+// starts at a nearby but detached horizontal offset; curriculum never lowers
+// the gripper, creates contact, or attaches the object. A successful approach
+// therefore remains attributable to the policy's object-relative observation.
 func (e *Environment) applyCurriculumReset() {
 	e.state.Phase = PhaseApproachObject
+	if e.currentCurriculumStage() == CurriculumAlignAndContact {
+		e.placeNearObjectForAlignLesson()
+	}
+}
+
+// placeNearObjectForAlignLesson shortens only the first learning problem. The
+// gripper remains open, above the object, and outside both alignment and
+// physical-contact tolerances, so the policy still has to choose the approach
+// and descent actions itself.
+func (e *Environment) placeNearObjectForAlignLesson() {
+	minimumDistance := 2*math.Max(e.config.HorizontalTolerance, e.config.GraspHorizontalTolerance) + 0.05
+	distance := math.Max(minimumDistance, e.config.Curriculum.AlignStartDistance+e.symmetricJitter(e.config.Curriculum.AlignStartDistanceJitter))
+	minimumX := e.config.Workspace.MinX + e.config.GripperWidth/2
+	maximumX := e.config.Workspace.MaxX - e.config.GripperWidth/2
+	direction := 1.0
+	if e.random.Intn(2) == 0 {
+		direction = -1
+	}
+	candidate := e.state.ObjectX + direction*distance
+	if candidate < minimumX || candidate > maximumX {
+		candidate = e.state.ObjectX - direction*distance
+	}
+	candidate = clamp(candidate, minimumX, maximumX)
+	if math.Abs(candidate-e.state.ObjectX) < minimumDistance {
+		candidate = clamp(e.state.ObjectX-direction*minimumDistance, minimumX, maximumX)
+	}
+	e.state.CarriageX = candidate
+	e.state.CarriageVelocityX = 0
 }
 
 // sampleEpisodeParameters produces a deterministic sequence for a given task
@@ -438,8 +467,14 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	if e.state.Phase == PhaseSuccess {
 		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
 		if !e.successRewardAwarded {
-			e.lastReward.Success = e.config.Reward.SuccessfulPlacement
-			e.lastReward.Total += e.lastReward.Success
+			switch e.currentCurriculumStage() {
+			case CurriculumAlignAndContact:
+				e.lastReward.Contact = e.config.Reward.SuccessfulContactReward
+				e.lastReward.Total += e.lastReward.Contact
+			case CurriculumTransportAndRelease, CurriculumFullPickAndPlace:
+				e.lastReward.Success = e.config.Reward.SuccessfulPlacement
+				e.lastReward.Total += e.lastReward.Success
+			}
 			e.successRewardAwarded = true
 		}
 		if e.config.Curriculum.Stage == CurriculumAutomatic {
@@ -457,8 +492,8 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 }
 
 // resetContactSuccessStreakOnFailure makes the first automatic lesson require
-// three consecutive successful episodes, rather than three arbitrary contacts
-// accumulated across timeouts or unsafe episodes.
+// its configured number of consecutive successful episodes, rather than
+// contacts accumulated across timeouts or unsafe episodes.
 func (e *Environment) resetContactSuccessStreakOnFailure() {
 	if e.config.Curriculum.Stage == CurriculumAutomatic && e.currentCurriculumStage() == CurriculumAlignAndContact {
 		e.contactSuccessStreak = 0
@@ -811,11 +846,12 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 			breakdown.Penalty += e.config.Reward.LowerStallPenalty
 		}
 	}
-	if attached && !e.gripBonusAwarded {
+	stage := e.currentCurriculumStage()
+	if stage != CurriculumAlignAndContact && attached && !e.gripBonusAwarded {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
 	}
-	if e.currentCurriculumStage() == CurriculumGrasp && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
+	if stage == CurriculumGrasp && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
 		// The actor, not a scripted force controller, must keep this condition
 		// true. Time scaling keeps the signal equivalent across fixed timesteps.
 		breakdown.Grip += e.config.Reward.GraspHoldRewardPerSecond * e.config.TimeStep
@@ -836,8 +872,9 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 		} else if e.state.Grip.ForceValid {
 			breakdown.Grip += e.config.Reward.AttachedForceStabilityReward
 			breakdown.Penalty -= e.config.Reward.ExcessGripForcePenaltyScale * math.Max(0, e.state.GripForce-e.requiredForce())
-			usableBand := math.Max(e.state.ObjectBreakForce-e.requiredForce(), 1e-9)
-			risk := clamp((e.state.GripForce-e.requiredForce())/usableBand, 0, 1)
+			barrierStart := e.config.Reward.NearBreakForceBarrierStartFraction * e.state.ObjectBreakForce
+			usableBand := math.Max(e.state.ObjectBreakForce-barrierStart, 1e-9)
+			risk := clamp((e.state.GripForce-barrierStart)/usableBand, 0, 1)
 			breakdown.BreakRisk = -e.config.Reward.NearBreakForcePenaltyScale * risk * risk
 			breakdown.Penalty += breakdown.BreakRisk
 		}
@@ -890,7 +927,7 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 	if e.state.BoundaryHit {
 		breakdown.Penalty += e.config.Reward.BoundaryCollisionPenalty
 	}
-	breakdown.Total = breakdown.Approach + breakdown.Grip + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
+	breakdown.Total = breakdown.Approach + breakdown.Contact + breakdown.Grip + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
 	return breakdown
 }
 

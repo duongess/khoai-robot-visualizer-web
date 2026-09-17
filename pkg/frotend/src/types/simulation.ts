@@ -272,6 +272,7 @@ export interface WorkerState {
 	grasp_hold_frames?: number;
 	grasp_hold_frames_required?: number;
 	homeostasis?: {
+		enabled: boolean;
 		energy: number;
 		delta: number;
 		decay: number;
@@ -280,6 +281,7 @@ export interface WorkerState {
 		event: string;
 	};
 	approach_reward?: number;
+	contact_reward?: number;
 	grip_reward?: number;
 	lift_reward?: number;
 	delivery_reward?: number;

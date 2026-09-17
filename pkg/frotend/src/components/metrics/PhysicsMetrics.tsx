@@ -57,6 +57,7 @@ export const PhysicsMetrics: React.FC = () => {
 	const contactDetected = worker?.contact_detected ?? false;
   const taskPhase: TaskPhase = worker?.task_phase ?? 'idle';
 	const homeostasis = worker?.homeostasis;
+	const homeostasisEnabled = homeostasis?.enabled ?? false;
 	const energy = homeostasis?.energy ?? 0;
 	const energyPercent = Math.min(100, Math.max(0, energy * 100));
   const phaseInfo = TASK_PHASE_LABELS[taskPhase] || { step: 0, label: taskPhase, desc: '' };
@@ -185,12 +186,14 @@ export const PhysicsMetrics: React.FC = () => {
 
 		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
 			<div className="flex justify-between text-[10px] text-slate-400">
-			  <span>Energy Reserve</span><span className="font-mono text-emerald-300">{energyPercent.toFixed(0)}%</span>
+			  <span>Homeostasis</span><span className={`font-mono ${homeostasisEnabled ? 'text-emerald-300' : 'text-slate-500'}`}>{homeostasisEnabled ? `${energyPercent.toFixed(0)}% energy` : 'OFF · physical reward only'}</span>
 			</div>
-			<div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-800">
-			  <div className="h-full bg-emerald-400 transition-all duration-150" style={{ width: `${energyPercent}%` }} />
-			</div>
-			{homeostasis?.event && <div className="mt-1 text-[9px] text-emerald-300">{homeostasis.event}</div>}
+			{homeostasisEnabled && <>
+			  <div className="mt-1 h-1.5 overflow-hidden rounded bg-slate-800">
+				<div className="h-full bg-emerald-400 transition-all duration-150" style={{ width: `${energyPercent}%` }} />
+			  </div>
+			  {homeostasis?.event && <div className="mt-1 text-[9px] text-emerald-300">{homeostasis.event}</div>}
+			</>}
 		  </div>
 
 		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">

@@ -31,7 +31,14 @@ requires a released object to settle inside the target zone for the configured
 number of steps. Telemetry exposes contact, attachment, object state, and each
 reward component for diagnosis.
 
-The coordinate/action/reward/reset schema is version 11. The force action is a
+Reward is separated by lesson: `align-and-contact` receives approach/lowering
+progress plus the one-time `SuccessfulContactReward` after verified contact;
+`grasp` receives the valid-attachment event and the secure-hold signal;
+`lift` receives lift progress while attached; and transport/full-task receive
+object-to-target progress and the final placement reward. Force in empty space
+is penalized only when there is no physical contact.
+
+The coordinate/action/reward/reset schema is version 12. The force action is a
 continuous policy-controlled actuator rate on every step; after attachment the
 environment reports slip feedback but never selects a grip-force target. The
 analytic required force is withheld from the default 23-value policy
@@ -112,26 +119,32 @@ All stages retain the same continuous action contract: horizontal, vertical
 only reset distributions and verified terminal conditions; they do not issue
 robot actions for the policy.
 
-Every lesson starts with the open, detached gripper at `InitialCarriageX` and
-the object at its own scene position. The policy receives the object-relative
-observation and must issue both the horizontal approach and negative vertical
-command; no curriculum reset moves the carriage onto the object or attaches it.
+Every lesson starts with an open, detached gripper and the object at its own
+scene position. For `align-and-contact` only, the carriage begins on a random
+side at `AlignStartDistance ± AlignStartDistanceJitter` (default `0.75 ± 0.15`
+m) from the object. This shortens initial exploration without creating contact,
+attachment, or a scripted approach. The policy still chooses both horizontal
+approach and negative vertical motion. Later lessons begin at
+`InitialCarriageX`.
 A contact is physically verified over
 `ContactStableSteps` frames, and automatic progression requires
 `ContactSuccessesRequired` consecutive successful contact **episodes** (ten
 by default). A timeout or other failed episode resets that streak. The `grasp`
 lesson then requires a secure, non-slipping attachment for
-`GraspHoldSeconds` (30 seconds by default) without interruption; a detach or
+`GraspHoldSeconds` (2 seconds by default) without interruption; a detach or
 slip restarts that timer. Configure these verification settings when changing
-its difficulty. `align-and-contact` uses a 250-step horizon by default so it
-resets/explores quickly; `grasp`, `lift`, `transport-and-release`, and the
-full task use 1,000 steps so later milestones have enough time to repeat
-prerequisite skills without a scripted reset state.
+its difficulty. `align-and-contact` uses a 200-step horizon by default so it
+resets/explores quickly; the other non-full lessons use the configured
+`EpisodeStepLimit` (250 by default), while the full task uses
+`MaxEpisodeSteps`.
 
-The learner should use `LEARNER_GAMMA=0.999` for this 0.1-second control loop:
-it preserves the future consequence of a break across the 30-second hold
-lesson. The force reward also includes a quadratic near-break barrier, so the
-policy receives a negative signal before it damages a contacted object.
+The learner should use `LEARNER_GAMMA=0.999` for this 0.1-second control loop
+when longer-horizon experiments require it. The force reward includes a
+quadratic near-break barrier only from `0.85 × F_break` upward, so normal safe
+grasp force is not discouraged while the policy still receives a negative
+signal before it damages a contacted object. Homeostasis is disabled by default
+while validating this physical reward/curriculum; enable it only as a separate
+motivation experiment.
 
 With `FORCE_CONTROL_CURRICULUM=auto`, every reset after the manually configured
 baseline varies object/target X, mass, friction, approach height, and terrain

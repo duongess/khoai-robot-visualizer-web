@@ -2,10 +2,11 @@ package forcecontrol
 
 import "fmt"
 
-// ValidateCheckpointSchema protects a future checkpoint loader from silently
-// applying a policy trained with different action or observation semantics.
-// The current learner has no checkpoint-loading path, so callers must invoke
-// this before loading any persisted policy into this environment.
+// ValidateCheckpointSchema prevents a persisted policy from silently being
+// used with different environment observation, action, reward, or reset
+// semantics. The Python learner validates its own architecture on restore;
+// callers must also invoke this environment-level guard before reusing a
+// checkpoint across a force-control schema change.
 func ValidateCheckpointSchema(checkpointVersion int) error {
 	if checkpointVersion != CoordinateSystemVersion {
 		return fmt.Errorf("checkpoint action schema is incompatible: checkpoint=v%d, environment=v%d; start a new training run", checkpointVersion, CoordinateSystemVersion)

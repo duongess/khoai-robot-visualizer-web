@@ -34,6 +34,7 @@ func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
 
 func TestHomeostasisEnergyDecaysOnceResetsAndStaysObservable(t *testing.T) {
 	config := DefaultConfig()
+	config.Homeostasis.Enabled = true
 	config.Homeostasis.InitialEnergy = 0.60
 	config.Homeostasis.EnergyDecayPerStep = 0.01
 	task := NewTask(42, config)
@@ -60,7 +61,9 @@ func TestHomeostasisEnergyDecaysOnceResetsAndStaysObservable(t *testing.T) {
 }
 
 func TestHomeostasisMilestonesAreVerifiedOneTimeAndClamped(t *testing.T) {
-	task := attachedTask(t, DefaultConfig())
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = true
+	task := attachedTask(t, config)
 	if !task.environment.gripFoodAwarded {
 		t.Fatal("physical secure grasp did not restore energy")
 	}
@@ -156,6 +159,7 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 
 func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	config := DefaultConfig()
+	config.Homeostasis.Enabled = true
 	config.InitialCarriageX = config.InitialObjectX
 	config.InitialGripperY = GraspHeight(config, config.Terrain[1].Y+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
@@ -417,7 +421,9 @@ func TestCheckpointSchemaRejectsPriorCoordinateSemantics(t *testing.T) {
 }
 
 func TestScriptedPickAndPlaceSucceeds(t *testing.T) {
-	task := NewTask(1, DefaultConfig())
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = true
+	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
@@ -592,6 +598,15 @@ func TestExcessForceAndAbruptForceChangesArePenalized(t *testing.T) {
 	if highResult.Reward >= lowResult.Reward {
 		t.Fatalf("excess force was not less rewarding: low=%v high=%v", lowResult.Reward, highResult.Reward)
 	}
+	belowBarrier := attachedTask(t, DefaultConfig())
+	belowBarrier.environment.state.GripForce = 0.84 * belowBarrier.environment.state.ObjectBreakForce
+	belowBarrierResult, err := belowBarrier.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if belowBarrierResult.Info["break_risk_penalty"] != 0 {
+		t.Fatalf("near-break barrier activated below configured threshold: %#v", belowBarrierResult.Info)
+	}
 	nearBreak := attachedTask(t, DefaultConfig())
 	usableBand := nearBreak.environment.state.ObjectBreakForce - nearBreak.environment.requiredForce()
 	nearBreak.environment.state.GripForce = nearBreak.environment.requiredForce() + 0.9*usableBand
@@ -608,6 +623,28 @@ func TestExcessForceAndAbruptForceChangesArePenalized(t *testing.T) {
 	}
 	if changed.Info["penalty_reward"] >= lowResult.Info["penalty_reward"] {
 		t.Fatalf("abrupt force change was not penalized: steady=%#v changed=%#v", lowResult.Info, changed.Info)
+	}
+}
+
+func TestAlignLessonStartsNearButDetachedAndAwardsOnlyContact(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAlignAndContact
+	config.Curriculum.Randomization.Enabled = false
+	task := NewTask(7, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	distance := math.Abs(task.environment.state.CarriageX - task.environment.state.ObjectX)
+	minimumDistance := 2*math.Max(config.HorizontalTolerance, config.GraspHorizontalTolerance) + 0.05
+	if distance < minimumDistance || distance > config.Curriculum.AlignStartDistance+config.Curriculum.AlignStartDistanceJitter+1e-9 {
+		t.Fatalf("align reset distance=%v, expected a nearby detached start", distance)
+	}
+	if task.environment.state.Grip.ContactDetected || task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("align reset fabricated contact or attachment: %#v", task.environment.state.Grip)
+	}
+	driveToContact(t, task)
+	if task.environment.lastReward.Contact != config.Reward.SuccessfulContactReward || task.environment.lastReward.Success != 0 {
+		t.Fatalf("align terminal reward must be contact-only: %#v", task.environment.lastReward)
 	}
 }
 
@@ -925,7 +962,7 @@ func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) 
 	config.Curriculum.Stage = CurriculumAutomatic
 	config.Curriculum.ContactStableSteps = 1
 	// This test isolates the stage-transition mechanism. The default policy is
-	// intentionally stricter and requires three consecutive contact episodes.
+	// intentionally stricter and requires ten consecutive contact episodes.
 	config.Curriculum.ContactSuccessesRequired = 1
 	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
@@ -1049,7 +1086,7 @@ func TestFailureResetRestoresDetachedRandomizedScene(t *testing.T) {
 	}
 }
 
-func TestCurriculumLessonsUseLongEpisodeHorizon(t *testing.T) {
+func TestCurriculumLessonsUseConfiguredEpisodeHorizon(t *testing.T) {
 	for _, stage := range []CurriculumStage{
 		CurriculumGrasp,
 		CurriculumLift,
@@ -1062,8 +1099,12 @@ func TestCurriculumLessonsUseLongEpisodeHorizon(t *testing.T) {
 		if _, err := task.Reset(); err != nil {
 			t.Fatal(err)
 		}
-		if got := task.environment.maxEpisodeSteps(); got != 1000 {
-			t.Fatalf("stage %q horizon = %d, want 1000", stage, got)
+		want := config.Curriculum.EpisodeStepLimit
+		if stage == CurriculumFullPickAndPlace {
+			want = config.MaxEpisodeSteps
+		}
+		if got := task.environment.maxEpisodeSteps(); got != want {
+			t.Fatalf("stage %q horizon = %d, want %d", stage, got, want)
 		}
 	}
 	config := DefaultConfig()
@@ -1072,8 +1113,8 @@ func TestCurriculumLessonsUseLongEpisodeHorizon(t *testing.T) {
 	if _, err := align.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if got := align.environment.maxEpisodeSteps(); got != 250 {
-		t.Fatalf("align-and-contact horizon = %d, want 250", got)
+	if got, want := align.environment.maxEpisodeSteps(), config.Curriculum.AlignEpisodeStepLimit; got != want {
+		t.Fatalf("align-and-contact horizon = %d, want %d", got, want)
 	}
 }
 
@@ -1254,7 +1295,9 @@ func TestDeliveryRewardRequiresAttachedObject(t *testing.T) {
 }
 
 func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
-	task := attachedTask(t, DefaultConfig())
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = true
+	task := attachedTask(t, config)
 	task.environment.state.Phase = PhaseMoveToTarget
 	previousEnergy := task.environment.state.Energy
 	result, err := task.Step(framework.Action{0, 0, -1})

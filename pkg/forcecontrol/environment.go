@@ -891,7 +891,20 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 	// Delivery reward is intentionally impossible without a secure attachment.
 	// It is measured from object-to-target distance, never gripper-to-target.
 	if previous.Phase == PhaseMoveToTarget && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
-		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * (targetDistance(previous) - targetDistance(e.state))
+		previousDistance := targetDistance(previous)
+		currentDistance := targetDistance(e.state)
+		deliveryDelta := previousDistance - currentDistance
+		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * deliveryDelta
+		if currentDistance > previousDistance {
+			breakdown.Penalty -= 12 * e.config.Reward.DeliveryProgressScale * (currentDistance - previousDistance)
+		}
+		targetOffset := math.Max(0, math.Abs(e.state.ObjectX-e.state.TargetX)-e.config.TargetWidth/2)
+		if targetOffset > 0 {
+			breakdown.Penalty -= 10 * targetOffset
+		}
+		if currentDistance > e.config.ReleaseTolerance {
+			breakdown.Penalty -= 6 * currentDistance
+		}
 	}
 	if previous.Grip.ObjectAttached && attached && previous.Phase != PhaseReleaseObject {
 		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(gripRateAction-previousGripRateAction)

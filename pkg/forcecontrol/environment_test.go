@@ -1427,6 +1427,39 @@ func TestDeliveryRewardRequiresAttachedObject(t *testing.T) {
 	}
 }
 
+func TestAttachedTransportAwayFromTargetIsNotProfitable(t *testing.T) {
+	config := DefaultConfig()
+	env := newEnvironment(1, config)
+	env.reset()
+	env.state.Phase = PhaseMoveToTarget
+	env.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true, Slipping: false}
+	env.state.GripForce = env.requiredForce()
+	env.state.CarriageX = 3.5
+	env.state.ObjectX = 3.5
+	env.state.ObjectY = 1.2
+	env.state.TargetX = 4.5
+	env.state.TargetY = 1.2
+	env.lastEnergyDelta = 0.18
+
+	previous := env.state
+	previous.Phase = PhaseMoveToTarget
+	previous.CarriageX = 3.5
+	previous.ObjectX = 3.5
+	previous.TargetX = 4.5
+	previous.TargetY = 1.2
+
+	env.state.CarriageX = 2.7
+	env.state.ObjectX = 2.7
+	env.state.ObjectY = 1.1
+	env.state.TargetX = 4.5
+	env.state.TargetY = 1.2
+
+	reward := env.reward(previous, 0.0, 0.0, 0.0)
+	if reward.Delivery >= 0 || reward.Total >= 0 {
+		t.Fatalf("attached drift away from target remained profitable: delivery=%v total=%v reward=%+v", reward.Delivery, reward.Total, reward)
+	}
+}
+
 func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = true

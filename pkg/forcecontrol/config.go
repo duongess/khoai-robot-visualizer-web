@@ -95,7 +95,7 @@ type CurriculumConfig struct {
 	// placing the gripper in contact or choosing an action for the policy.
 	AlignStartDistance       float64
 	AlignStartDistanceJitter float64
-	Randomization    CurriculumRandomization
+	Randomization            CurriculumRandomization
 	// AlignEpisodeStepLimit is the short exploration horizon for the first
 	// lesson. Later lessons use EpisodeStepLimit so they have time to carry out
 	// approach, grasp, lift, and transport prerequisites.
@@ -109,8 +109,8 @@ type CurriculumConfig struct {
 
 // RewardConfig contains the reward-shaping constants for one episode.
 type RewardConfig struct {
-	TimePenalty                 float64
-	ApproachProgressScale       float64
+	TimePenalty           float64
+	ApproachProgressScale float64
 	// SuccessfulContactReward is a one-time terminal reward for a verified
 	// physical contact in the align-and-contact lesson. It is intentionally not
 	// the pick-and-place placement reward.
@@ -132,19 +132,23 @@ type RewardConfig struct {
 	// NearBreakForcePenaltyScale is a quadratic force barrier within the safe
 	// band. It makes approaching break force costly before the terminal damage
 	// event, rather than relying on a delayed discounted failure signal.
-	NearBreakForcePenaltyScale   float64
+	NearBreakForcePenaltyScale float64
 	// NearBreakForceBarrierStartFraction activates the barrier only above this
 	// fraction of F_break. It must be strictly in (0, 1).
 	NearBreakForceBarrierStartFraction float64
-	AttachedForceStabilityReward float64
-	InvalidGripPenalty           float64
-	EmptyGripStepPenalty         float64
-	DetachedExcessForcePenalty   float64
-	InactivityPenalty            float64
-	EmptyTargetPenalty           float64
-	DroppedObjectPenalty         float64
-	BoundaryCollisionPenalty     float64
-	LowerProgressScale           float64
+	AttachedForceStabilityReward       float64
+	InvalidGripPenalty                 float64
+	EmptyGripStepPenalty               float64
+	DetachedExcessForcePenalty         float64
+	InactivityPenalty                  float64
+	EmptyTargetPenalty                 float64
+	DroppedObjectPenalty               float64
+	BoundaryCollisionPenalty           float64
+	LowerProgressScale                 float64
+	AlignedPositionReward              float64
+	StableAlignmentReward              float64
+	AlignmentVelocityPenalty           float64
+	ActionNearTargetPenalty            float64
 	// LowerStallPenalty applies only while the carriage is horizontally
 	// aligned in the lowering phase but fails to reduce its vertical grasp
 	// error. It prevents X-axis dithering from being a cheap alternative to
@@ -224,6 +228,8 @@ type Config struct {
 	VerticalTolerance        float64
 	GraspHorizontalTolerance float64
 	GraspVerticalTolerance   float64
+	AlignmentEnterTolerance  float64
+	AlignmentExitTolerance   float64
 	ClosedOpeningThreshold   float64
 	StableVelocityThreshold  float64
 	StablePlacementSteps     int
@@ -280,6 +286,8 @@ func DefaultConfig() Config {
 		VerticalTolerance:        0.10,
 		GraspHorizontalTolerance: 0.15,
 		GraspVerticalTolerance:   0.10,
+		AlignmentEnterTolerance:  0.15,
+		AlignmentExitTolerance:   0.25,
 		ClosedOpeningThreshold:   0.35,
 		StableVelocityThreshold:  0.05,
 		StablePlacementSteps:     3,
@@ -293,7 +301,7 @@ func DefaultConfig() Config {
 		Homeostasis: HomeostasisConfig{
 			// Keep reward shaping auditable while validating the curriculum. This
 			// can be enabled later as a separate motivation experiment.
-			Enabled:                       false,
+			Enabled:                       true,
 			InitialEnergy:                 0.60,
 			EnergyDecayPerStep:            0.001,
 			SecureGripEnergyGain:          0.06,
@@ -306,10 +314,12 @@ func DefaultConfig() Config {
 		Curriculum: CurriculumConfig{
 			Stage:                    CurriculumFullPickAndPlace,
 			ContactStartHeightOffset: 0.30,
-			// A real contact needs only one settled physics frame within an
-			// episode, but automatic curriculum requires consecutive contact
-			// episodes before proceeding to grasp.
-			ContactStableSteps:       1,
+			// Lesson 1 should require a genuinely stable contact, not a single lucky
+			// frame. At 0.1s per physics step, 20 frames is approximately 2s of
+			// sustained alignment and slow motion on both the X and Y axes; the
+			// automatic curriculum still requires 10 consecutive successful episodes
+			// before advancing to the grasp lesson.
+			ContactStableSteps:       5,
 			ContactSuccessesRequired: 10,
 			// A short secure hold verifies a real attachment before lift, without
 			// making the early curriculum excessively sparse.
@@ -341,27 +351,27 @@ func DefaultConfig() Config {
 			// The first learned subgoal is horizontal object approach. Signed
 			// distance progress dominates the small time cost, while movement away
 			// receives the equal negative term.
-			ApproachProgressScale:        3.0,
-			SuccessfulContactReward:      5.0,
-			SuccessfulGripReward:         5.0,
-			LiftProgressScale:            2.0,
-			DeliveryProgressScale:        3.0,
-			SuccessfulPlacement:          50.0,
-			UnsafeDropPenalty:            -10.0,
-			BreakPenalty:                 -20.0,
-			WorkspacePenalty:             -20.0,
-			InsufficientGripPenalty:      -1.0,
-			InsufficientGripStepPenalty:  -0.05,
-			GripForceProgressScale:       0.5,
-			GripActionChangePenalty:      0.02,
-			GripForceChangePenaltyScale:  0.02,
-			SlipPenalty:                  -1.0,
-			ExcessGripForcePenaltyScale:  0.05,
-			NearBreakForcePenaltyScale:   1.50,
+			ApproachProgressScale:              3.0,
+			SuccessfulContactReward:            5.0,
+			SuccessfulGripReward:               10.0,
+			LiftProgressScale:                  2.0,
+			DeliveryProgressScale:              3.0,
+			SuccessfulPlacement:                50.0,
+			UnsafeDropPenalty:                  -10.0,
+			BreakPenalty:                       -20.0,
+			WorkspacePenalty:                   -20.0,
+			InsufficientGripPenalty:            -0.5,
+			InsufficientGripStepPenalty:        -0.01,
+			GripForceProgressScale:             1.0,
+			GripActionChangePenalty:            0.02,
+			GripForceChangePenaltyScale:        0.02,
+			SlipPenalty:                        -1.0,
+			ExcessGripForcePenaltyScale:        0.05,
+			NearBreakForcePenaltyScale:         0.30,
 			NearBreakForceBarrierStartFraction: 0.85,
-			AttachedForceStabilityReward: 0.02,
-			InvalidGripPenalty:           -1.0,
-			EmptyGripStepPenalty:         -0.01,
+			AttachedForceStabilityReward:       0.02,
+			InvalidGripPenalty:                 -1.0,
+			EmptyGripStepPenalty:               -0.01,
 			// Empty-space force is not a grasp. A bounded ongoing cost makes
 			// building force to the material limit before contact unattractive.
 			DetachedExcessForcePenalty: -0.50,
@@ -372,7 +382,11 @@ func DefaultConfig() Config {
 			// Descending toward the physical grasp guide needs a denser signal
 			// than a distant terminal placement reward. This is still signed
 			// progress, so upward/away motion is penalized symmetrically.
-			LowerProgressScale: 3.0,
+			LowerProgressScale:       3.0,
+			AlignedPositionReward:    0.01,
+			StableAlignmentReward:    0.05,
+			AlignmentVelocityPenalty: 0.05,
+			ActionNearTargetPenalty:  0.02,
 			// Once aligned over the object, lateral motion without vertical
 			// progress must not be safer than attempting a grasp.
 			LowerStallPenalty: -0.02,
@@ -381,7 +395,7 @@ func DefaultConfig() Config {
 			ApproachStallPenalty: -0.02,
 			// Thirty seconds of a secure hold earns 4.5 reward in addition to the
 			// one-time grip and final lesson-success rewards.
-			GraspHoldRewardPerSecond: 0.15,
+			GraspHoldRewardPerSecond: 0.50,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},
 	}

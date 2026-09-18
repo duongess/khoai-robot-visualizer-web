@@ -54,17 +54,17 @@ type GripState struct {
 // RewardBreakdown keeps every reward term observable so training behaviour can
 // be diagnosed without reverse engineering a scalar reward from telemetry.
 type RewardBreakdown struct {
-	Approach    float64
-	Contact     float64
-	Grip        float64
-	Lift        float64
-	Delivery    float64
-	Success     float64
-	Homeostasis float64
-	DetachedForce  float64
+	Approach      float64
+	Contact       float64
+	Grip          float64
+	Lift          float64
+	Delivery      float64
+	Success       float64
+	Homeostasis   float64
+	DetachedForce float64
 	BreakRisk     float64
-	Penalty     float64
-	Total       float64
+	Penalty       float64
+	Total         float64
 }
 
 // Phase describes progress through one policy-controlled pick-and-place episode.
@@ -457,7 +457,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		e.resetContactSuccessStreakOnFailure()
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
 		e.updateHomeostasis(terminalReason)
-		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
+		e.lastReward = e.reward(previous, filteredValues[0], filteredValues[2], previousGripRateAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
 		e.lastReward.Total += e.failurePenalty(terminalReason)
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
@@ -465,7 +465,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.updatePhase(previous)
 	e.updateHomeostasis("")
 	if e.state.Phase == PhaseSuccess {
-		e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
+		e.lastReward = e.reward(previous, filteredValues[0], filteredValues[2], previousGripRateAction)
 		if !e.successRewardAwarded {
 			switch e.currentCurriculumStage() {
 			case CurriculumAlignAndContact:
@@ -487,7 +487,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
-	e.lastReward = e.reward(previous, filteredValues[2], previousGripRateAction)
+	e.lastReward = e.reward(previous, filteredValues[0], filteredValues[2], previousGripRateAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
 }
 
@@ -760,10 +760,22 @@ func (e *Environment) updatePhase(previous State) {
 		return
 	}
 	if stage == CurriculumAlignAndContact {
-		// Fall through to the ordinary approach/lower phase machine before
-		// evaluating contact, so phase-specific shaping remains truthful.
+		// Lesson 1 counts a real stable contact even if the gripper has already
+		// reached an attached hold. The curriculum's first task is not “grasp
+		// success”; it is “position and stabilize the end-effector against the object
+		// long enough”. Counting both detached contact and a stable attached hold
+		// prevents the policy from oscillating between contact and release while
+		// still rewarding genuine 2s contact stability.
 		e.updateStandardPhase(previous)
-		if e.state.Grip.ContactDetected && math.Abs(e.state.GripperVelocityY) <= e.config.StableVelocityThreshold && math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
+		stableContact := e.state.Grip.ContactDetected &&
+			math.Abs(e.state.GripperVelocityY) <= e.config.StableVelocityThreshold &&
+			math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold &&
+			math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance &&
+			math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance
+		stableAttachedHold := e.state.Grip.ObjectAttached && !e.state.Grip.Slipping &&
+			math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold &&
+			math.Abs(e.state.GripperVelocityY) <= e.config.StableVelocityThreshold
+		if stableContact || stableAttachedHold {
 			e.contactStableFrames++
 		} else {
 			e.contactStableFrames = 0
@@ -781,19 +793,20 @@ func (e *Environment) requiredGraspHoldFrames() int {
 }
 
 func (e *Environment) updateStandardPhase(previous State) {
+	xError := math.Abs(e.state.CarriageX - e.state.ObjectX)
 	switch previous.Phase {
 	case PhaseApproachObject:
-		if math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.HorizontalTolerance {
+		if xError <= e.config.AlignmentEnterTolerance && math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
 			e.state.Phase = PhaseLowerToObject
 		}
 	case PhaseLowerToObject:
-		if math.Abs(e.state.CarriageX-e.state.ObjectX) > e.config.HorizontalTolerance {
+		if xError > e.config.AlignmentExitTolerance {
 			e.state.Phase = PhaseApproachObject
 		} else if math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance {
 			e.state.Phase = PhaseGripObject
 		}
 	case PhaseGripObject:
-		if math.Abs(e.state.CarriageX-e.state.ObjectX) > e.config.HorizontalTolerance {
+		if xError > e.config.AlignmentExitTolerance {
 			e.state.Phase = PhaseApproachObject
 		} else if math.Abs(e.state.GripperY-e.objectGripHeight()) > e.config.VerticalTolerance {
 			e.state.Phase = PhaseLowerToObject
@@ -813,13 +826,13 @@ func (e *Environment) updateStandardPhase(previous State) {
 			e.state.Phase = PhaseReleaseObject
 		}
 	case PhaseReleaseObject:
-		if !e.state.Grip.ObjectAttached && e.objectInsideTarget() && e.objectStable() {
+		if e.releaseCommanded && !e.state.Grip.ObjectAttached && e.objectInsideTarget() && e.objectStable() {
 			e.state.Phase = PhaseSuccess
 		}
 	}
 }
 
-func (e *Environment) reward(previous State, gripRateAction, previousGripRateAction float64) RewardBreakdown {
+func (e *Environment) reward(previous State, horizontalAction, gripRateAction, previousGripRateAction float64) RewardBreakdown {
 	breakdown := RewardBreakdown{Homeostasis: e.lastEnergyDelta}
 	// The enabled homeostatic decay replaces the ordinary time penalty so an
 	// idle step has one clear, visible baseline cost instead of two.
@@ -846,14 +859,30 @@ func (e *Environment) reward(previous State, gripRateAction, previousGripRateAct
 			breakdown.Penalty += e.config.Reward.LowerStallPenalty
 		}
 	}
+	if !attached && previous.Phase != PhaseGripObject {
+		xError := math.Abs(e.state.CarriageX - e.state.ObjectX)
+		if xError <= e.config.AlignmentEnterTolerance {
+			breakdown.Approach += e.config.Reward.AlignedPositionReward
+			breakdown.Approach -= e.config.Reward.AlignmentVelocityPenalty * math.Abs(e.state.CarriageVelocityX)
+			if math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
+				breakdown.Approach += e.config.Reward.StableAlignmentReward
+			}
+			if xError <= e.config.HorizontalTolerance {
+				breakdown.Penalty -= e.config.Reward.ActionNearTargetPenalty * math.Abs(horizontalAction)
+			}
+		}
+	}
 	stage := e.currentCurriculumStage()
 	if stage != CurriculumAlignAndContact && attached && !e.gripBonusAwarded {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
 	}
-	if stage == CurriculumGrasp && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
-		// The actor, not a scripted force controller, must keep this condition
-		// true. Time scaling keeps the signal equivalent across fixed timesteps.
+	if (stage == CurriculumGrasp || stage == CurriculumFullPickAndPlace) && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
+		// The secure-hold signal is a core competence for both the isolated grasp
+		// lesson and the final full pick-and-place stage. A genuine 2s hold must
+		// remain rewarding even after the curriculum advances away from the pure
+		// grasp task, while the release gate still requires the actor to actually
+		// command a release at the placement target.
 		breakdown.Grip += e.config.Reward.GraspHoldRewardPerSecond * e.config.TimeStep
 	}
 	if previous.Phase == PhaseLiftObject && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {

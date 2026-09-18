@@ -872,6 +872,61 @@ func TestGraspHoldRewardRequiresSecureAttachment(t *testing.T) {
 	}
 }
 
+func TestFullPickAndPlaceRewardIncludesSecureHold(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	task := attachedTask(t, config)
+	result, err := task.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimumHoldReward := config.Reward.AttachedForceStabilityReward + config.Reward.GraspHoldRewardPerSecond*config.TimeStep
+	if !task.environment.state.Grip.ObjectAttached || task.environment.state.Grip.Slipping || float64(result.Info["grip_reward"])+1e-6 < minimumHoldReward {
+		t.Fatalf("full pick-and-place secure hold did not receive time-scaled reward: state=%#v info=%#v", task.environment.state.Grip, result.Info)
+	}
+}
+
+func TestReleaseOnlyCompletesAtTargetAfterExplicitReleaseCommand(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseReleaseObject
+	task.environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	task.environment.state.ObjectGrasped = true
+	task.environment.state.ObjectX = task.environment.state.TargetX
+	task.environment.state.ObjectY = task.environment.targetRestHeight()
+	task.environment.state.CarriageX = task.environment.state.TargetX
+	task.environment.state.GripperY = task.environment.targetReleaseGuideHeight()
+	task.environment.state.ObjectPlaced = true
+	task.environment.state.PlacementStableSteps = config.StablePlacementSteps - 1
+	task.environment.releaseCommanded = false
+
+	first, err := task.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Done || task.environment.state.Phase == PhaseSuccess {
+		t.Fatalf("release succeeded without an explicit release command at the target: %#v", first)
+	}
+
+	for step := 0; step < config.StablePlacementSteps+3; step++ {
+		result, err := task.Step(framework.Action{0, 0, -1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Done {
+			if result.Outcome != OutcomeSuccess || task.environment.state.Phase != PhaseSuccess {
+				t.Fatalf("release at target did not succeed with the explicit release command: result=%#v phase=%s stableSteps=%d", result, task.environment.state.Phase, task.environment.state.PlacementStableSteps)
+			}
+			return
+		}
+	}
+	t.Fatalf("release at target never reached success with the explicit release command: phase=%s stableSteps=%d", task.environment.state.Phase, task.environment.state.PlacementStableSteps)
+}
+
 func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	alignConfig := DefaultConfig()
 	alignConfig.Curriculum.Stage = CurriculumAlignAndContact
@@ -1041,6 +1096,84 @@ func driveToContact(t *testing.T, task *Task) {
 		if _, err := task.Step(framework.Action{float32(horizontal), float32(vertical), 0}); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestApproachPhaseRequiresStableAlignment(t *testing.T) {
+	config := DefaultConfig()
+	config.HorizontalTolerance = 0.15
+	config.AlignmentEnterTolerance = 0.15
+	config.AlignmentExitTolerance = 0.25
+	config.StableVelocityThreshold = 0.05
+	state := State{CarriageX: 0.10, ObjectX: 0, CarriageVelocityX: 0.04, Phase: PhaseApproachObject}
+	env := newEnvironment(99, config)
+	env.state = state
+	env.updateStandardPhase(State{CarriageX: 0.12, ObjectX: 0, Phase: PhaseApproachObject})
+	if env.state.Phase != PhaseLowerToObject {
+		t.Fatalf("aligned but moving phase = %s, want %s", env.state.Phase, PhaseLowerToObject)
+	}
+
+	env.state = State{CarriageX: 0.10, ObjectX: 0, CarriageVelocityX: 0.10, Phase: PhaseApproachObject}
+	env.updateStandardPhase(State{CarriageX: 0.12, ObjectX: 0, Phase: PhaseApproachObject})
+	if env.state.Phase != PhaseApproachObject {
+		t.Fatalf("fast aligned approach phase = %s, want %s", env.state.Phase, PhaseApproachObject)
+	}
+
+	env.state = State{CarriageX: 0.30, ObjectX: 0, CarriageVelocityX: 0.01, Phase: PhaseLowerToObject}
+	env.updateStandardPhase(State{CarriageX: 0.20, ObjectX: 0, Phase: PhaseLowerToObject})
+	if env.state.Phase != PhaseApproachObject {
+		t.Fatalf("exit hysteresis phase = %s, want %s", env.state.Phase, PhaseApproachObject)
+	}
+}
+
+func TestRewardRewardsStableAlignmentNearTarget(t *testing.T) {
+	config := DefaultConfig()
+	config.HorizontalTolerance = 0.15
+	config.AlignmentEnterTolerance = 0.15
+	config.AlignmentExitTolerance = 0.25
+	config.StableVelocityThreshold = 0.05
+	config.Reward.ApproachProgressScale = 3.0
+	config.Reward.AlignedPositionReward = 0.01
+	config.Reward.StableAlignmentReward = 0.05
+	config.Reward.AlignmentVelocityPenalty = 0.05
+	config.Reward.ActionNearTargetPenalty = 0.02
+	config.Reward.InactivityPenalty = -0.005
+
+	env := newEnvironment(100, config)
+	e := State{CarriageX: 0.12, ObjectX: 0, CarriageVelocityX: 0.02, Phase: PhaseApproachObject}
+	env.state = State{CarriageX: 0.10, ObjectX: 0, CarriageVelocityX: 0.02, Phase: PhaseApproachObject}
+	reward := env.reward(e, 0.8, 0.8, 0)
+	if reward.Approach <= config.Reward.StableAlignmentReward {
+		t.Fatalf("stable alignment reward too small: %#v", reward)
+	}
+	if reward.Approach <= 0 {
+		t.Fatalf("near-target alignment should be rewarded: %#v", reward)
+	}
+}
+
+func TestStableAttachedGripCountsTowardAlignAndContactSuccess(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAlignAndContact
+	config.Curriculum.ContactStableSteps = 2
+	config.StableVelocityThreshold = 0.05
+	env := newEnvironment(101, config)
+	for step := 0; step < 2; step++ {
+		env.state = State{
+			CarriageX:         0.10,
+			ObjectX:           0,
+			CarriageVelocityX: 0.01,
+			GripperY:          0.60,
+			GripperVelocityY:  0.01,
+			Grip:              GripState{ContactDetected: true, ObjectAttached: true, GripperClosed: true, ForceValid: true},
+			Phase:             PhaseApproachObject,
+		}
+		env.updatePhase(State{Phase: PhaseApproachObject})
+		if env.state.Phase == PhaseSuccess {
+			return
+		}
+	}
+	if env.state.Phase != PhaseSuccess {
+		t.Fatalf("stable attached grip did not count as align-and-contact success after the required frames: phase=%s stableFrames=%d", env.state.Phase, env.contactStableFrames)
 	}
 }
 

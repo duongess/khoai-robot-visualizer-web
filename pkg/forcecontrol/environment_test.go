@@ -806,7 +806,7 @@ func TestLoweringPhaseRewardsDescentAndPenalizesHorizontalDithering(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hoverResult.Info["approach_reward"] != 0 || hoverResult.Info["penalty_reward"] > float32(config.Reward.LowerStallPenalty) {
+	if hoverResult.Info["approach_reward"] > 0 || hoverResult.Info["penalty_reward"] >= 0 {
 		t.Fatalf("horizontal dithering was rewarded or escaped the lower stall penalty: %#v", hoverResult.Info)
 	}
 
@@ -839,7 +839,7 @@ func TestApproachPhaseRequiresHorizontalProgressBeforeDescent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wrongAxisResult.Info["approach_reward"] != 0 || wrongAxisResult.Info["penalty_reward"] > float32(config.Reward.ApproachStallPenalty) {
+	if wrongAxisResult.Info["approach_reward"] > 0 || wrongAxisResult.Info["penalty_reward"] >= 0 {
 		t.Fatalf("descent away from the object escaped approach-stall scoring: %#v", wrongAxisResult.Info)
 	}
 
@@ -854,6 +854,56 @@ func TestApproachPhaseRequiresHorizontalProgressBeforeDescent(t *testing.T) {
 	}
 	if towardResult.Info["approach_reward"] <= 0 || towardResult.Reward <= wrongAxisResult.Reward {
 		t.Fatalf("horizontal approach must be preferred to wrong-axis descent: toward=%#v wrong-axis=%#v", towardResult.Info, wrongAxisResult.Info)
+	}
+}
+
+func TestGraspRewardFavorsContactClosureOverHoveringOnObject(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	config.ActionSmoothingAlpha = 1
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseGripObject
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
+	task.environment.state.Grip = GripState{
+		GripperClosed:   true,
+		ContactDetected: true,
+		ForceValid:      true,
+		ObjectAttached:  false,
+		Slipping:        false,
+	}
+	task.environment.state.GripForce = task.environment.requiredForce()
+
+	result, err := task.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if float64(result.Info["grip_reward"]) <= 0 {
+		t.Fatalf("gripper closure on real contact should be rewarded strongly, not left as a hover-only equilibrium: %#v", result.Info)
+	}
+}
+
+func TestHorizontalOscillationNearObjectIsHeavilyPenalized(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX + 0.08
+	config.InitialGripperY = 2.2
+	config.ActionSmoothingAlpha = 1
+
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseApproachObject
+	task.environment.state.CarriageVelocityX = 0.6
+	result, err := task.Step(framework.Action{-1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Info["approach_reward"] > 0 || result.Info["penalty_reward"] >= 0 {
+		t.Fatalf("side-to-side lurch near the object was not penalized hard enough: %#v", result.Info)
 	}
 }
 

@@ -843,9 +843,16 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 	if previous.Phase == PhaseApproachObject && !attached {
 		previousHorizontal := math.Abs(previous.CarriageX - previous.ObjectX)
 		currentHorizontal := math.Abs(e.state.CarriageX - e.state.ObjectX)
-		breakdown.Approach = e.config.Reward.ApproachProgressScale * (previousHorizontal - currentHorizontal)
+		progress := previousHorizontal - currentHorizontal
+		breakdown.Approach = e.config.Reward.ApproachProgressScale * progress
 		if previousHorizontal > e.config.HorizontalTolerance && currentHorizontal >= previousHorizontal-1e-6 {
 			breakdown.Penalty += e.config.Reward.ApproachStallPenalty
+		}
+		if previousHorizontal <= e.config.AlignmentEnterTolerance && math.Abs(horizontalAction) > 1e-6 && progress <= 0 {
+			// Near the object, a side-to-side move is not a valid approach. It
+			// must either reduce X error or be scored as a strong stall.
+			breakdown.Approach = 0
+			breakdown.Penalty += 4 * e.config.Reward.ApproachStallPenalty
 		}
 	}
 	if previous.Phase == PhaseLowerToObject && !attached {
@@ -854,7 +861,14 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 		// dithering can masquerade as progress while the gripper stays high.
 		previousError := e.loweringErrorFor(previous)
 		currentError := e.loweringErrorFor(e.state)
-		breakdown.Approach = e.config.Reward.LowerProgressScale * (previousError - currentError)
+		previousHorizontal := math.Abs(previous.CarriageX - previous.ObjectX)
+		currentHorizontal := math.Abs(e.state.CarriageX - e.state.ObjectX)
+		if previousHorizontal <= e.config.AlignmentEnterTolerance && currentHorizontal >= previousHorizontal-1e-6 && math.Abs(horizontalAction) > 1e-6 {
+			breakdown.Approach = 0
+			breakdown.Penalty += 4 * e.config.Reward.LowerStallPenalty
+		} else {
+			breakdown.Approach = e.config.Reward.LowerProgressScale * (previousError - currentError)
+		}
 		if currentError >= previousError-1e-6 {
 			breakdown.Penalty += e.config.Reward.LowerStallPenalty
 		}
@@ -873,9 +887,18 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 		}
 	}
 	stage := e.currentCurriculumStage()
+	if e.state.Grip.GripperClosed && e.state.Grip.ContactDetected && !attached && !e.state.Grip.Slipping {
+		// A closed gripper on real contact is the exact precursor to a successful
+		// secure grasp. This dense bonus prevents the policy from treating a
+		// hover-only alignment as the lowest-risk equilibrium.
+		breakdown.Contact += e.config.Reward.ContactClosureReward
+	}
 	if stage != CurriculumAlignAndContact && attached && !e.gripBonusAwarded {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
+	}
+	if attached && !e.state.Grip.Slipping {
+		breakdown.Grip += e.config.Reward.AttachedForceStabilityReward * 4
 	}
 	if (stage == CurriculumGrasp || stage == CurriculumFullPickAndPlace) && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
 		// The secure-hold signal is a core competence for both the isolated grasp

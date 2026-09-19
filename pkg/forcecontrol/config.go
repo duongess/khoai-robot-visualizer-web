@@ -115,6 +115,7 @@ type RewardConfig struct {
 	// physical contact in the align-and-contact lesson. It is intentionally not
 	// the pick-and-place placement reward.
 	SuccessfulContactReward     float64
+	ContactClosureReward        float64
 	SuccessfulGripReward        float64
 	LiftProgressScale           float64
 	DeliveryProgressScale       float64
@@ -323,7 +324,7 @@ func DefaultConfig() Config {
 			ContactSuccessesRequired: 10,
 			// A short secure hold verifies a real attachment before lift, without
 			// making the early curriculum excessively sparse.
-			GraspHoldSeconds: 2,
+			GraspHoldSeconds: 5,
 			// Start close enough to make horizontal approach learnable, but never
 			// inside tolerance/contact. The random side prevents a fixed left/right
 			// shortcut from becoming a valid policy.
@@ -353,6 +354,7 @@ func DefaultConfig() Config {
 			// receives the equal negative term.
 			ApproachProgressScale:              3.0,
 			SuccessfulContactReward:            5.0,
+			ContactClosureReward:               2.0,
 			SuccessfulGripReward:               10.0,
 			LiftProgressScale:                  2.0,
 			DeliveryProgressScale:              3.0,

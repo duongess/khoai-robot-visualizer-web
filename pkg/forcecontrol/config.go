@@ -385,8 +385,8 @@ func DefaultConfig() Config {
 			// than a distant terminal placement reward. This is still signed
 			// progress, so upward/away motion is penalized symmetrically.
 			LowerProgressScale:       3.0,
-			AlignedPositionReward:    0.01,
-			StableAlignmentReward:    0.05,
+			AlignedPositionReward:    0.002,
+			StableAlignmentReward:    0.005,
 			AlignmentVelocityPenalty: 0.05,
 			ActionNearTargetPenalty:  0.02,
 			// Once aligned over the object, lateral motion without vertical

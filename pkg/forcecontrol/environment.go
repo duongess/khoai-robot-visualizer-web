@@ -876,6 +876,9 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 	if !attached && previous.Phase != PhaseGripObject {
 		xError := math.Abs(e.state.CarriageX - e.state.ObjectX)
 		if xError <= e.config.AlignmentEnterTolerance {
+			// Near-object alignment is only a tiny breadcrumb toward the real
+			// objective. A hover-by-the-object equilibrium must not outrank a true
+			// contact and secure hold.
 			breakdown.Approach += e.config.Reward.AlignedPositionReward
 			breakdown.Approach -= e.config.Reward.AlignmentVelocityPenalty * math.Abs(e.state.CarriageVelocityX)
 			if math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
@@ -884,13 +887,18 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 			if xError <= e.config.HorizontalTolerance {
 				breakdown.Penalty -= e.config.Reward.ActionNearTargetPenalty * math.Abs(horizontalAction)
 			}
+			if xError <= e.config.HorizontalTolerance && math.Abs(horizontalAction) > 0 || xError <= e.config.AlignmentEnterTolerance && math.Abs(e.state.CarriageVelocityX) > e.config.StableVelocityThreshold {
+				breakdown.Approach = math.Min(breakdown.Approach, 0.01)
+			}
 		}
 	}
 	stage := e.currentCurriculumStage()
-	if e.state.Grip.GripperClosed && e.state.Grip.ContactDetected && !attached && !e.state.Grip.Slipping {
-		// A closed gripper on real contact is the exact precursor to a successful
-		// secure grasp. This dense bonus prevents the policy from treating a
-		// hover-only alignment as the lowest-risk equilibrium.
+	if e.state.Grip.GripperClosed && e.state.Grip.ContactDetected && !attached && !e.state.Grip.Slipping &&
+		(previous.Phase == PhaseLowerToObject || previous.Phase == PhaseGripObject || e.state.Phase == PhaseGripObject) {
+		// Only count a contact-only closure when the end-effector has actually
+		// entered the grasping slice of the curriculum. A closed gripper still
+		// hovering in the approach phase is not a valid grasp success signal and
+		// therefore should not earn the same bonus as a real contact event.
 		breakdown.Contact += e.config.Reward.ContactClosureReward
 	}
 	if stage != CurriculumAlignAndContact && attached && !e.gripBonusAwarded {

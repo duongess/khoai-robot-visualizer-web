@@ -907,6 +907,28 @@ func TestHorizontalOscillationNearObjectIsHeavilyPenalized(t *testing.T) {
 	}
 }
 
+func TestNearObjectAlignmentIsOnlyTinyRewardComparedToRealContact(t *testing.T) {
+	config := DefaultConfig()
+	config.InitialCarriageX = config.InitialObjectX + 0.05
+	config.InitialGripperY = 2.2
+	config.ActionSmoothingAlpha = 1
+
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseApproachObject
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
+	result, err := task.Step(framework.Action{0, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if float64(result.Info["approach_reward"]) > 0.01 {
+		t.Fatalf("mere alignment near the object should be a tiny reward, not a goal in itself: %#v", result.Info)
+	}
+}
+
 func TestGraspHoldRewardRequiresSecureAttachment(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumGrasp

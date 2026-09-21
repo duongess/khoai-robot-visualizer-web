@@ -157,6 +157,42 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 	}
 }
 
+func TestAlignLessonUsesGraspDistanceAndChargesRemainingDistance(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumAlignAndContact
+	environment := newEnvironment(2, config)
+	previous := State{Phase: PhaseApproachObject, CarriageX: 2, GripperY: 1, ObjectX: 1, ObjectY: 0.425}
+	environment.state = previous
+	environment.state.CarriageX = 1.9
+	closer := environment.reward(previous, 0, 0, 0)
+	environment.state.CarriageX = 2.1
+	away := environment.reward(previous, 0, 0, 0)
+	if closer.Approach <= away.Approach || closer.Total <= away.Total {
+		t.Fatalf("align reward must prefer reducing grasp-pose distance: closer=%#v away=%#v", closer, away)
+	}
+}
+
+func TestAlignLessonCannotFarmRewardByReturningToAnOldBest(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumAlignAndContact
+	environment := newEnvironment(3, config)
+	previous := State{Phase: PhaseApproachObject, CarriageX: 2, GripperY: 1, ObjectX: 1, ObjectY: 0.425}
+	environment.state = previous
+	environment.state.CarriageX = 1.8
+	_ = environment.reward(previous, 0, 0, 0)
+	previous = environment.state
+	environment.state.CarriageX = 2.0
+	_ = environment.reward(previous, 0, 0, 0)
+	previous = environment.state
+	environment.state.CarriageX = 1.8
+	returned := environment.reward(previous, 0, 0, 0)
+	if returned.Approach != 0 {
+		t.Fatalf("returning to an old best distance was rewarded: %#v", returned)
+	}
+}
+
 func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = true
@@ -321,7 +357,7 @@ func TestVerticalSignReversalDoesNotKeepAStaleUpwardCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reversed.Info["filtered_action_vertical"] >= 0 || task.environment.state.GripperVelocityY > 0 || task.environment.state.GripperY > before {
+	if reversed.Info["filtered_action_vertical"] != 0 || task.environment.state.GripperVelocityY > 0 || task.environment.state.GripperY > before {
 		t.Fatalf("negative vertical reversal retained upward motion: state=%#v info=%#v", task.environment.state, reversed.Info)
 	}
 }
@@ -635,12 +671,16 @@ func TestAlignLessonStartsNearButDetachedAndAwardsOnlyContact(t *testing.T) {
 		t.Fatal(err)
 	}
 	distance := math.Abs(task.environment.state.CarriageX - task.environment.state.ObjectX)
-	minimumDistance := 2*math.Max(config.HorizontalTolerance, config.GraspHorizontalTolerance) + 0.05
-	if distance < minimumDistance || distance > config.Curriculum.AlignStartDistance+config.Curriculum.AlignStartDistanceJitter+1e-9 {
-		t.Fatalf("align reset distance=%v, expected a nearby detached start", distance)
+	minimumDistance := math.Max(config.AlignmentExitTolerance, config.GraspHorizontalTolerance) + 0.05
+	if distance < minimumDistance {
+		t.Fatalf("align reset distance=%v, expected an independent detached start", distance)
 	}
 	if task.environment.state.Grip.ContactDetected || task.environment.state.Grip.ObjectAttached {
 		t.Fatalf("align reset fabricated contact or attachment: %#v", task.environment.state.Grip)
+	}
+	verticalDistance := math.Abs(task.environment.state.GripperY - task.environment.objectGripHeight())
+	if verticalDistance <= config.GraspVerticalTolerance || verticalDistance > config.Curriculum.ContactStartHeightOffset+config.Curriculum.Randomization.ContactStartHeightJitter+1e-9 {
+		t.Fatalf("align reset vertical distance=%v, expected nearby but detached", verticalDistance)
 	}
 	driveToContact(t, task)
 	if task.environment.lastReward.Contact != config.Reward.SuccessfulContactReward || task.environment.lastReward.Success != 0 {

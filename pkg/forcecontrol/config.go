@@ -90,9 +90,9 @@ type CurriculumConfig struct {
 	// configured fixed TimeStep, so changing simulation speed does not silently
 	// make the lesson easier or harder.
 	GraspHoldSeconds float64
-	// AlignStartDistance is the detached horizontal distance from the object at
-	// the start of the first lesson. It reduces exploration time without
-	// placing the gripper in contact or choosing an action for the policy.
+	// AlignStartDistance is retained for compatibility with older launch
+	// configurations. Lesson 1 now samples carriage position independently of
+	// the object, so this legacy distance no longer teleports the gripper near it.
 	AlignStartDistance       float64
 	AlignStartDistanceJitter float64
 	// GraspStartDistance and GraspStartHeightOffset define a detached, nearby
@@ -118,6 +118,10 @@ type CurriculumConfig struct {
 type RewardConfig struct {
 	TimePenalty           float64
 	ApproachProgressScale float64
+	// AlignDistancePenaltyScale is a small per-step cost for remaining far from
+	// the grasp pose during lesson 1. Progress shaping still pays for reducing
+	// that distance, so waiting cannot become a profitable equilibrium.
+	AlignDistancePenaltyScale float64
 	// SuccessfulContactReward is a one-time terminal reward for a verified
 	// physical contact in the align-and-contact lesson. It is intentionally not
 	// the pick-and-place placement reward.
@@ -364,10 +368,11 @@ func DefaultConfig() Config {
 		},
 		Reward: RewardConfig{
 			TimePenalty: -0.001,
-			// The first learned subgoal is horizontal object approach. Signed
-			// distance progress dominates the small time cost, while movement away
-			// receives the equal negative term.
+			// The first learned subgoal is horizontal object approach. Only new
+			// best-distance progress is rewarded; the time and stall costs make
+			// hovering or returning to an old position unprofitable.
 			ApproachProgressScale:              3.0,
+			AlignDistancePenaltyScale:          0.02,
 			SuccessfulContactReward:            5.0,
 			ContactClosureReward:               2.0,
 			SuccessfulGripReward:               10.0,

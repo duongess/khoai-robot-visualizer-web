@@ -648,6 +648,70 @@ func TestAlignLessonStartsNearButDetachedAndAwardsOnlyContact(t *testing.T) {
 	}
 }
 
+func TestGraspLessonStartsNearThePoseButDetached(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumGrasp
+	config.Curriculum.Randomization.Enabled = false
+	task := NewTask(17, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	state := task.environment.state
+	horizontalDistance := math.Abs(state.CarriageX - state.ObjectX)
+	minimumDistance := math.Max(config.AlignmentEnterTolerance, config.GraspHorizontalTolerance) + 0.05
+	if horizontalDistance < minimumDistance || horizontalDistance > config.Curriculum.GraspStartDistance+config.Curriculum.GraspStartDistanceJitter+1e-9 {
+		t.Fatalf("grasp reset horizontal distance=%v, want nearby but detached", horizontalDistance)
+	}
+	verticalDistance := math.Abs(state.GripperY - task.environment.objectGripHeight())
+	if verticalDistance <= config.GraspVerticalTolerance {
+		t.Fatalf("grasp reset fabricated vertical contact: state=%#v grasp_y=%v", state, task.environment.objectGripHeight())
+	}
+	if state.Grip.ContactDetected || state.Grip.ObjectAttached || state.Grip.GripperClosed {
+		t.Fatalf("grasp reset fabricated grip state: %#v", state.Grip)
+	}
+}
+
+func TestContactClosureRewardIsOneTimeInGraspLesson(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumGrasp
+	environment := newEnvironment(18, config)
+	previous := State{Phase: PhaseGripObject}
+	environment.state = State{
+		Phase: PhaseGripObject,
+		Grip:  GripState{GripperClosed: true, ContactDetected: true},
+	}
+	first := environment.reward(previous, 0, 0, 0)
+	second := environment.reward(previous, 0, 0, 0)
+	if first.Contact != config.Reward.ContactClosureReward || second.Contact != 0 {
+		t.Fatalf("contact reward must be a one-time grasp event: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestFullTaskDoesNotPayForHoldingStill(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	environment := newEnvironment(19, config)
+	previous := State{
+		Phase:            PhaseMoveToTarget,
+		ObjectX:          2,
+		ObjectY:          1,
+		TargetX:          4,
+		TargetY:          1,
+		ObjectMass:       config.ObjectMass,
+		ObjectFriction:   config.ObjectFriction,
+		ObjectBreakForce: config.ObjectBreakForce,
+		GripForce:        12,
+		Grip:             GripState{ObjectAttached: true, ForceValid: true},
+	}
+	environment.state = previous
+	reward := environment.reward(previous, 0, 0, 0)
+	if reward.Grip != 0 || reward.Delivery != 0 {
+		t.Fatalf("full task must not reward an attached object that makes no progress: %#v", reward)
+	}
+}
+
 func TestMassAndFrictionChangePolicyForceDemandWithoutLeakingRequirement(t *testing.T) {
 	lightConfig := DefaultConfig()
 	heavyConfig := DefaultConfig()
@@ -1527,7 +1591,7 @@ func TestAttachedTransportAwayFromTargetIsNotProfitable(t *testing.T) {
 	env.state.TargetY = 1.2
 
 	reward := env.reward(previous, 0.0, 0.0, 0.0)
-	if reward.Delivery >= 0 || reward.Total >= 0 {
+	if reward.Delivery >= 0 || reward.Total >= 0 || math.Abs(reward.Penalty) > 1e-9 {
 		t.Fatalf("attached drift away from target remained profitable: delivery=%v total=%v reward=%+v", reward.Delivery, reward.Total, reward)
 	}
 }

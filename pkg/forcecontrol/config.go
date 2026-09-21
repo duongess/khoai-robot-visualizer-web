@@ -95,6 +95,13 @@ type CurriculumConfig struct {
 	// placing the gripper in contact or choosing an action for the policy.
 	AlignStartDistance       float64
 	AlignStartDistanceJitter float64
+	// GraspStartDistance and GraspStartHeightOffset define a detached, nearby
+	// reset distribution for the grasp lesson. They are not a scripted grasp:
+	// the policy still has to align, lower, close, and build force itself.
+	GraspStartDistance       float64
+	GraspStartDistanceJitter float64
+	GraspStartHeightOffset   float64
+	GraspStartHeightJitter   float64
 	Randomization            CurriculumRandomization
 	// AlignEpisodeStepLimit is the short exploration horizon for the first
 	// lesson. Later lessons use EpisodeStepLimit so they have time to carry out
@@ -220,6 +227,7 @@ type Config struct {
 	InitialObjectX           float64
 	InitialObjectMass        float64
 	ObjectFriction           float64
+	ObjectMass               float64
 	ObjectBreakForce         float64
 	InitialCarriageX         float64
 	InitialGripperY          float64
@@ -324,12 +332,19 @@ func DefaultConfig() Config {
 			ContactSuccessesRequired: 10,
 			// A short secure hold verifies a real attachment before lift, without
 			// making the early curriculum excessively sparse.
-			GraspHoldSeconds: 5,
+			GraspHoldSeconds: 2,
 			// Start close enough to make horizontal approach learnable, but never
 			// inside tolerance/contact. The random side prevents a fixed left/right
 			// shortcut from becoming a valid policy.
 			AlignStartDistance:       0.75,
 			AlignStartDistanceJitter: 0.15,
+			// Grasp begins close to, but deliberately outside, the physical
+			// contact tolerances. This keeps the lesson focused on the grasp
+			// rather than repeatedly relearning the already mastered approach.
+			GraspStartDistance:       0.35,
+			GraspStartDistanceJitter: 0.10,
+			GraspStartHeightOffset:   0.35,
+			GraspStartHeightJitter:   0.10,
 			// Disabled for the deterministic default scene. The demo turns this on
 			// for FORCE_CONTROL_CURRICULUM=auto, where every lesson benefits from
 			// varied but reproducible reset conditions.
@@ -395,8 +410,8 @@ func DefaultConfig() Config {
 			// While still horizontally out of reach, lowering alone is not useful
 			// progress and must not be a cheap way to wait out an episode.
 			ApproachStallPenalty: -0.02,
-			// Thirty seconds of a secure hold earns 4.5 reward in addition to the
-			// one-time grip and final lesson-success rewards.
+			// The grasp lesson's secure hold earns dense feedback after a valid
+			// attachment; transport relies on object-to-target progress instead.
 			GraspHoldRewardPerSecond: 0.50,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},

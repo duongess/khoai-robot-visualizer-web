@@ -143,17 +143,33 @@ type RewardConfig struct {
 	// SuccessfulContactReward is a one-time terminal reward for a verified
 	// physical contact in the align-and-contact lesson. It is intentionally not
 	// the pick-and-place placement reward.
-	SuccessfulContactReward     float64
-	ContactClosureReward        float64
-	SuccessfulGripReward        float64
-	LiftProgressScale           float64
-	DeliveryProgressScale       float64
-	SuccessfulPlacement         float64
-	UnsafeDropPenalty           float64
-	BreakPenalty                float64
+	SuccessfulContactReward float64
+	ContactClosureReward    float64
+	SuccessfulGripReward    float64
+	LiftProgressScale       float64
+	DeliveryProgressScale   float64
+	SuccessfulPlacement     float64
+	UnsafeDropPenalty       float64
+	BreakPenalty            float64
+	// GraspBreakPenalty overrides BreakPenalty only for CurriculumGrasp. It is
+	// intentionally softer during early force exploration; later transport and
+	// placement lessons retain the full material-damage consequence.
+	GraspBreakPenalty           float64
 	WorkspacePenalty            float64
 	InsufficientGripPenalty     float64
 	InsufficientGripStepPenalty float64
+	// ForceProgressScale rewards signed dF while touching the object below the
+	// required force. It gives the actor a dense gradient while it ramps force
+	// instead of making attachment the first non-zero signal.
+	ForceProgressScale float64
+	// ContactWithoutGripForceThreshold and ContactWithoutGripTimeoutFrames
+	// define the grasp-only failure for resting in physical contact without
+	// attempting a force ramp. IdleContactTimeoutPenalty is terminal.
+	ContactWithoutGripForceThreshold float64
+	ContactWithoutGripTimeoutFrames  int
+	IdleContactTimeoutPenalty        float64
+	// GripForceProgressScale remains accepted for source/config compatibility.
+	// New code uses ForceProgressScale.
 	GripForceProgressScale      float64
 	GripActionChangePenalty     float64
 	GripForceChangePenaltyScale float64
@@ -401,19 +417,27 @@ func DefaultConfig() Config {
 			ActionDeltaPenaltyScale:       0.01,
 			// Match vertical descent shaping so every metre of genuine approach
 			// earns an immediate, signed transition reward.
-			ApproachProgressScale:              3.0,
-			AlignDistancePenaltyScale:          0.02,
-			SuccessfulContactReward:            5.0,
-			ContactClosureReward:               2.0,
-			SuccessfulGripReward:               15.0,
-			LiftProgressScale:                  2.0,
-			DeliveryProgressScale:              3.0,
-			SuccessfulPlacement:                50.0,
-			UnsafeDropPenalty:                  -10.0,
-			BreakPenalty:                       -20.0,
-			WorkspacePenalty:                   -20.0,
-			InsufficientGripPenalty:            -0.5,
-			InsufficientGripStepPenalty:        -0.01,
+			ApproachProgressScale:       3.0,
+			AlignDistancePenaltyScale:   0.02,
+			SuccessfulContactReward:     5.0,
+			ContactClosureReward:        2.0,
+			SuccessfulGripReward:        15.0,
+			LiftProgressScale:           2.0,
+			DeliveryProgressScale:       3.0,
+			SuccessfulPlacement:         50.0,
+			UnsafeDropPenalty:           -10.0,
+			BreakPenalty:                -20.0,
+			GraspBreakPenalty:           -5.0,
+			WorkspacePenalty:            -20.0,
+			InsufficientGripPenalty:     -0.5,
+			InsufficientGripStepPenalty: -0.01,
+			// A +1 force-rate command increases 1.2N/step by default. Ramping
+			// from 0 to about 11.2N therefore returns approximately +5.4 reward
+			// before attachment, giving SAC a dense, low-risk exploration signal.
+			ForceProgressScale:                 0.5,
+			ContactWithoutGripForceThreshold:   2.0,
+			ContactWithoutGripTimeoutFrames:    20,
+			IdleContactTimeoutPenalty:          -6.0,
 			GripForceProgressScale:             1.0,
 			GripActionChangePenalty:            0.02,
 			GripForceChangePenaltyScale:        0.02,

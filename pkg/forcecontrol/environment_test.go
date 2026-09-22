@@ -160,6 +160,88 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 	}
 }
 
+func TestGraspForceRampReceivesSignedDenseProgressReward(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumGrasp
+	environment := newEnvironment(8, config)
+	previous := State{Phase: PhaseGripObject, GripForce: 0, ObjectMass: config.InitialObjectMass, ObjectFriction: config.ObjectFriction, ObjectBreakForce: config.ObjectBreakForce}
+	environment.state = previous
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true}
+	environment.state.GripForce = 1.2
+	up := environment.rewardWithActions(previous, [3]float64{0, 0, 1}, [3]float64{})
+	if want := config.Reward.ForceProgressScale * 1.2; math.Abs(up.Grip-want) > 1e-9 {
+		t.Fatalf("force-ramp reward = %v, want %v", up.Grip, want)
+	}
+	previous = environment.state
+	environment.state.GripForce = 0.8
+	down := environment.rewardWithActions(previous, [3]float64{0, 0, -1}, [3]float64{})
+	if want := -config.Reward.ForceProgressScale * 0.4; math.Abs(down.Grip-want) > 1e-9 {
+		t.Fatalf("force-backoff reward = %v, want %v", down.Grip, want)
+	}
+}
+
+func TestGraspContactWithoutForceTimesOutButAlignDoesNot(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumGrasp
+	config.Reward.ContactWithoutGripTimeoutFrames = 3
+	task := NewTask(9, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
+	task.environment.state.Phase = PhaseGripObject
+	for step := 0; step < config.Reward.ContactWithoutGripTimeoutFrames; step++ {
+		result, err := task.Step(framework.Action{0, 0, 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if step+1 < config.Reward.ContactWithoutGripTimeoutFrames && result.Done {
+			t.Fatalf("grasp timed out too early at step %d: %#v", step+1, result)
+		}
+		if step+1 == config.Reward.ContactWithoutGripTimeoutFrames {
+			if !result.Done || result.Outcome != OutcomeFailure || task.environment.failureReason != "idle_contact_timeout" || result.Reward > float32(config.Reward.IdleContactTimeoutPenalty) {
+				t.Fatalf("idle contact did not terminate with the configured penalty: reason=%q result=%#v", task.environment.failureReason, result)
+			}
+		}
+	}
+
+	alignConfig := config
+	alignConfig.Curriculum.Stage = CurriculumAlignAndContact
+	align := NewTask(10, alignConfig)
+	if _, err := align.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	align.environment.state.CarriageX = align.environment.state.ObjectX
+	align.environment.state.GripperY = align.environment.objectGripHeight()
+	align.environment.state.Phase = PhaseGripObject
+	for step := 0; step < alignConfig.Reward.ContactWithoutGripTimeoutFrames+1; step++ {
+		result, err := align.Step(framework.Action{0, 0, 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Done && align.environment.failureReason == "idle_contact_timeout" {
+			t.Fatalf("align lesson must allow zero-force contact: %#v", result)
+		}
+	}
+}
+
+func TestGraspUsesSoftBreakPenaltyForExploration(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumGrasp
+	environment := newEnvironment(11, config)
+	if got := environment.failurePenalty("object_break"); got != config.Reward.GraspBreakPenalty {
+		t.Fatalf("grasp break penalty = %v, want %v", got, config.Reward.GraspBreakPenalty)
+	}
+	environment.activeCurriculumStage = CurriculumFullPickAndPlace
+	environment.config.Curriculum.Stage = CurriculumFullPickAndPlace
+	if got := environment.failurePenalty("object_break"); got != config.Reward.BreakPenalty {
+		t.Fatalf("full-task break penalty = %v, want %v", got, config.Reward.BreakPenalty)
+	}
+}
+
 func TestAlignResetUniformlySpawnsObjectAndBalancesCarriageSides(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumAlignAndContact

@@ -13,7 +13,7 @@ const ObservationDimension = 29
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 22
+const CoordinateSystemVersion = 23
 
 const (
 	observationGripperX = iota
@@ -194,6 +194,7 @@ type Environment struct {
 	lastEnergyEvent                energyEvent
 	contactStableFrames            int
 	secureGripHoldFrames           int
+	contactWithoutGripFrames       int
 	contactSuccessStreak           int
 	activeCurriculumStage          CurriculumStage
 	advanceCurriculumOnReset       bool
@@ -287,6 +288,7 @@ func (e *Environment) reset() State {
 	e.lastEnergyEvent = energyEventNone
 	e.contactStableFrames = 0
 	e.secureGripHoldFrames = 0
+	e.contactWithoutGripFrames = 0
 	e.applyCurriculumReset()
 	e.resetCount++
 	e.ready = true
@@ -552,6 +554,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.applyGripControl(filteredValues[2])
 	e.lastAppliedAction = filteredValues
 	e.updateGripState()
+	e.updateContactWithoutGripCounter()
 	if e.state.Grip.ObjectAttached {
 		e.wasEverGrasped = true
 	}
@@ -795,6 +798,19 @@ func (e *Environment) updateGripState() {
 	state.ObjectGrasped = grip.ObjectAttached
 }
 
+// updateContactWithoutGripCounter applies only to the grasp curriculum. The
+// align-and-contact lesson is explicitly allowed to make stable zero-force
+// contact, whereas grasp must teach the actor to begin a force ramp.
+func (e *Environment) updateContactWithoutGripCounter() {
+	if e.currentCurriculumStage() == CurriculumGrasp &&
+		e.state.Grip.ContactDetected &&
+		e.state.GripForce < e.config.Reward.ContactWithoutGripForceThreshold {
+		e.contactWithoutGripFrames++
+		return
+	}
+	e.contactWithoutGripFrames = 0
+}
+
 func (e *Environment) contactDetected() bool {
 	horizontalError := math.Abs(e.state.CarriageX - e.state.ObjectX)
 	verticalError := math.Abs(e.state.GripperY - e.objectGripHeight())
@@ -854,6 +870,9 @@ func (e *Environment) detectFailure(previous State) string {
 		return "unsafe_drop"
 	case previous.Phase == PhaseReleaseObject && !e.state.Grip.ObjectAttached && !e.objectInsideTarget():
 		return "release_outside_target"
+	case e.currentCurriculumStage() == CurriculumGrasp &&
+		e.contactWithoutGripFrames >= e.config.Reward.ContactWithoutGripTimeoutFrames:
+		return "idle_contact_timeout"
 	case e.state.EpisodeStep >= e.maxEpisodeSteps():
 		return "timeout"
 	}
@@ -1083,14 +1102,17 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		breakdown.DetachedForce = e.config.Reward.DetachedExcessForcePenalty * ratio * ratio
 		breakdown.Penalty += breakdown.DetachedForce
 	}
+	if stage == CurriculumGrasp && e.state.Grip.ContactDetected && e.state.GripForce < e.requiredForce() {
+		// Give the actor signed, step-local feedback while it ramps from zero to
+		// the attachment threshold. A force decrease receives the same magnitude
+		// in the negative direction, so cycling force cannot farm this reward.
+		deltaForce := e.state.GripForce - previous.GripForce
+		breakdown.Grip += e.config.Reward.ForceProgressScale * deltaForce
+	}
 	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !attached {
-		// Force must converge to the attachment threshold. Signed progress makes
-		// oscillating above and below the threshold non-profitable, while the
-		// configured per-step cost prevents an indefinitely slipping grip from
-		// becoming a cheap terminal policy.
-		previousGap := math.Max(0, e.requiredForce()-previous.GripForce)
-		currentGap := math.Max(0, e.requiredForce()-e.state.GripForce)
-		breakdown.Grip += e.config.Reward.GripForceProgressScale * (previousGap - currentGap)
+		// The small per-step cost prevents a contact with insufficient force from
+		// becoming a cheap equilibrium while the dense force-progress reward
+		// above makes increasing force preferable to idling.
 		if !e.state.Grip.ForceValid && !previous.Grip.GripperClosed {
 			breakdown.Penalty += e.config.Reward.InsufficientGripPenalty
 		}
@@ -1160,7 +1182,12 @@ func (e *Environment) updateHomeostasis(failureReason string) {
 func (e *Environment) failurePenalty(reason string) float64 {
 	switch reason {
 	case "object_break":
+		if e.currentCurriculumStage() == CurriculumGrasp {
+			return e.config.Reward.GraspBreakPenalty
+		}
 		return e.config.Reward.BreakPenalty
+	case "idle_contact_timeout":
+		return e.config.Reward.IdleContactTimeoutPenalty
 	case "workspace_violation":
 		return e.config.Reward.WorkspacePenalty
 	case "unsafe_drop", "release_outside_target":
@@ -1186,6 +1213,8 @@ func (e *Environment) failureReasonCode() int {
 		return 5
 	case "invalid_state":
 		return 6
+	case "idle_contact_timeout":
+		return 7
 	default:
 		return 0
 	}

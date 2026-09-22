@@ -13,7 +13,7 @@ const ObservationDimension = 29
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 21
+const CoordinateSystemVersion = 22
 
 const (
 	observationGripperX = iota
@@ -306,20 +306,37 @@ func (e *Environment) applyCurriculumReset() {
 	}
 }
 
-// placeNearObjectForAlignLesson samples an independent reset pose for lesson 1.
-// The old implementation derived carriage X from ObjectX, which silently
-// solved the approach subproblem before SAC received its first observation.
-// The sampled pose stays in safe bounds and above the grasp height, but never
-// fabricates contact or attachment.
+// placeNearObjectForAlignLesson samples a symmetric, detached relative pose
+// for lesson 1. It chooses left/right with equal probability, then samples a
+// safe offset on that side. The policy must still learn the signed X approach;
+// reset never aligns, contacts, or attaches the object on its behalf.
 func (e *Environment) placeNearObjectForAlignLesson() {
 	safeMinX, safeMaxX, _, _ := e.safeBounds()
 	minimumDistance := math.Max(e.config.AlignmentExitTolerance, e.config.GraspHorizontalTolerance) + 0.05
-	for attempt := 0; attempt < 16; attempt++ {
-		e.state.CarriageX = safeMinX + e.random.Float64()*(safeMaxX-safeMinX)
-		if math.Abs(e.state.CarriageX-e.state.ObjectX) >= minimumDistance || attempt == 15 {
-			break
-		}
+	maximumDistance := math.Max(minimumDistance, e.config.Curriculum.AlignStartDistance+e.symmetricJitter(e.config.Curriculum.AlignStartDistanceJitter))
+	// A single coin flip is intentionally retained even near workspace edges:
+	// the distance range is shortened on that side rather than biasing all
+	// starts toward the roomier side of the rail.
+	direction := 1.0
+	if e.random.Intn(2) == 0 {
+		direction = -1
 	}
+	availableDistance := safeMaxX - e.state.ObjectX
+	if direction < 0 {
+		availableDistance = e.state.ObjectX - safeMinX
+	}
+	maximumDistance = math.Min(maximumDistance, availableDistance)
+	// Alignment object-spawn bounds guarantee this under the default geometry.
+	// If a custom workspace is too narrow, use the largest safe detached pose
+	// instead of emitting an invalid state.
+	if maximumDistance < minimumDistance {
+		maximumDistance = math.Max(0, availableDistance)
+	}
+	distance := maximumDistance
+	if maximumDistance > minimumDistance {
+		distance = minimumDistance + e.random.Float64()*(maximumDistance-minimumDistance)
+	}
+	e.state.CarriageX = clamp(e.state.ObjectX+direction*distance, safeMinX, safeMaxX)
 	e.state.CarriageVelocityX = 0
 	_, _, minimumY, maximumY := e.safeBounds()
 	graspY := e.objectGripHeight()
@@ -382,27 +399,62 @@ func (e *Environment) sampleEpisodeParameters() (objectX, targetX, mass, frictio
 	objectX, targetX = e.config.InitialObjectX, e.config.TargetX
 	mass, friction = e.config.InitialObjectMass, e.config.ObjectFriction
 	randomization := e.config.Curriculum.Randomization
+	stage := e.currentCurriculumStage()
+	if stage == CurriculumAlignAndContact {
+		// Lesson 1 must learn a directional approach rather than memorize the
+		// historical 1.5m object location. On the default 6m rail this is the
+		// requested uniform [0.8, 5.2] distribution; custom workspaces fall back
+		// to their geometry-safe interior.
+		minimumObjectX, maximumObjectX := e.alignmentObjectSpawnBounds()
+		objectX = minimumObjectX + e.random.Float64()*(maximumObjectX-minimumObjectX)
+	}
 	// The first reset after creating/replacing a task is exact. This makes a
 	// paused manual scene edit observable as the episode's authoritative state;
 	// subsequent resets vary around that manually chosen baseline.
-	if !randomization.Enabled || e.resetCount == 0 {
-		return
-	}
-	objectX = clamp(objectX+e.symmetricJitter(randomization.ObjectXJitter), e.config.Workspace.MinX+e.config.ObjectWidth/2, e.config.Workspace.MaxX-e.config.ObjectWidth/2)
-	targetX = clamp(targetX+e.symmetricJitter(randomization.TargetXJitter), e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
-	mass = math.Max(0.01, mass+e.symmetricJitter(randomization.ObjectMassJitter))
-	friction = clamp(friction+e.symmetricJitter(randomization.ObjectFrictionJitter), 0.05, 2)
-
-	// Do not accidentally turn transport into a zero-distance placement task.
-	minimumSeparation := (e.config.ObjectWidth+e.config.TargetWidth)/2 + e.config.HorizontalTolerance
-	if math.Abs(targetX-objectX) < minimumSeparation {
-		if targetX >= objectX {
-			targetX = clamp(objectX+minimumSeparation, e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
-		} else {
-			targetX = clamp(objectX-minimumSeparation, e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
+	if randomization.Enabled && e.resetCount > 0 {
+		if stage != CurriculumAlignAndContact {
+			objectX = clamp(objectX+e.symmetricJitter(randomization.ObjectXJitter), e.config.Workspace.MinX+e.config.ObjectWidth/2, e.config.Workspace.MaxX-e.config.ObjectWidth/2)
 		}
+		targetX = clamp(targetX+e.symmetricJitter(randomization.TargetXJitter), e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
+		mass = math.Max(0.01, mass+e.symmetricJitter(randomization.ObjectMassJitter))
+		friction = clamp(friction+e.symmetricJitter(randomization.ObjectFrictionJitter), 0.05, 2)
+	}
+	if stage == CurriculumAlignAndContact {
+		targetX = e.separateTargetFromObject(objectX, targetX)
 	}
 	return
+}
+
+func (e *Environment) alignmentObjectSpawnBounds() (minimumX, maximumX float64) {
+	safeMinimum := e.config.Workspace.MinX + e.config.ObjectWidth/2
+	safeMaximum := e.config.Workspace.MaxX - e.config.ObjectWidth/2
+	minimumX = math.Max(0.8, safeMinimum)
+	maximumX = math.Min(5.2, safeMaximum)
+	if minimumX > maximumX {
+		return safeMinimum, safeMaximum
+	}
+	return minimumX, maximumX
+}
+
+// separateTargetFromObject prevents align-and-contact episodes from starting
+// as an already-completed placement problem. It preserves the configured
+// target side when possible and otherwise uses the other valid side.
+func (e *Environment) separateTargetFromObject(objectX, targetX float64) float64 {
+	minimumSeparation := (e.config.ObjectWidth+e.config.TargetWidth)/2 + e.config.HorizontalTolerance
+	minimumTargetX := e.config.Workspace.MinX + e.config.TargetWidth/2
+	maximumTargetX := e.config.Workspace.MaxX - e.config.TargetWidth/2
+	if math.Abs(targetX-objectX) >= minimumSeparation {
+		return clamp(targetX, minimumTargetX, maximumTargetX)
+	}
+	direction := 1.0
+	if targetX < objectX {
+		direction = -1
+	}
+	candidate := objectX + direction*minimumSeparation
+	if candidate < minimumTargetX || candidate > maximumTargetX {
+		candidate = objectX - direction*minimumSeparation
+	}
+	return clamp(candidate, minimumTargetX, maximumTargetX)
 }
 
 // resetTerrain restores the manually configured terrain and then, for
@@ -410,7 +462,10 @@ func (e *Environment) sampleEpisodeParameters() (objectX, targetX, mass, frictio
 // resting heights are calculated after this call, so neither can be embedded
 // in the terrain merely because the ground changed.
 func (e *Environment) resetTerrain() {
-	e.config.Terrain = append(e.config.Terrain[:0], e.baseTerrain...)
+	// Allocate a new slice rather than reusing e.config.Terrain's backing array:
+	// Config is owned by the caller and must not be mutated by per-episode
+	// terrain randomization.
+	e.config.Terrain = append([]TerrainPoint(nil), e.baseTerrain...)
 	randomization := e.config.Curriculum.Randomization
 	if !randomization.Enabled || e.resetCount == 0 || randomization.TerrainHeightJitter == 0 {
 		return

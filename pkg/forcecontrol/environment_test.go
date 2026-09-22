@@ -160,6 +160,42 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 	}
 }
 
+func TestAlignResetUniformlySpawnsObjectAndBalancesCarriageSides(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumAlignAndContact
+	config.Curriculum.Randomization.Enabled = false
+	task := NewTask(29, config)
+	left, right := 0, 0
+	for reset := 0; reset < 500; reset++ {
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		state := task.environment.state
+		if state.ObjectX < 0.8 || state.ObjectX > 5.2 {
+			t.Fatalf("align object X=%v outside uniform spawn interval [0.8, 5.2]", state.ObjectX)
+		}
+		minimumSeparation := (config.ObjectWidth+config.TargetWidth)/2 + config.HorizontalTolerance
+		if math.Abs(state.TargetX-state.ObjectX) < minimumSeparation-1e-9 {
+			t.Fatalf("align reset overlapped object and target: %#v", state)
+		}
+		deltaX := state.CarriageX - state.ObjectX
+		if math.Abs(deltaX) > config.Curriculum.AlignStartDistance+1e-9 {
+			t.Fatalf("align carriage offset=%v exceeds %vm", deltaX, config.Curriculum.AlignStartDistance)
+		}
+		if math.Abs(deltaX) < config.AlignmentExitTolerance+0.05-1e-9 {
+			t.Fatalf("align reset fabricated horizontal alignment: %#v", state)
+		}
+		if deltaX < 0 {
+			left++
+		} else {
+			right++
+		}
+	}
+	if difference := math.Abs(float64(left-right)) / 500; difference > 0.12 {
+		t.Fatalf("align carriage sides are not balanced: left=%d right=%d", left, right)
+	}
+}
+
 func TestPhaseOneApproachProgressRewardsEachSignedHorizontalReduction(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
@@ -1469,8 +1505,12 @@ func TestCurriculumRandomizationVariesResetsReproducibly(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstEpisode := first.environment.state
-	if firstEpisode.ObjectX != config.InitialObjectX || firstEpisode.TargetX != config.TargetX {
-		t.Fatalf("first randomized reset must preserve the manually configured baseline: %#v", firstEpisode)
+	if firstEpisode.ObjectX < 0.8 || firstEpisode.ObjectX > 5.2 {
+		t.Fatalf("first align reset must use the uniform object distribution: %#v", firstEpisode)
+	}
+	minimumSeparation := (config.ObjectWidth+config.TargetWidth)/2 + config.HorizontalTolerance
+	if math.Abs(firstEpisode.TargetX-firstEpisode.ObjectX) < minimumSeparation-1e-9 {
+		t.Fatalf("first align reset overlapped object and target: %#v", firstEpisode)
 	}
 	if _, err := first.Reset(); err != nil {
 		t.Fatal(err)

@@ -90,9 +90,9 @@ type CurriculumConfig struct {
 	// configured fixed TimeStep, so changing simulation speed does not silently
 	// make the lesson easier or harder.
 	GraspHoldSeconds float64
-	// AlignStartDistance is retained for compatibility with older launch
-	// configurations. Lesson 1 now samples carriage position independently of
-	// the object, so this legacy distance no longer teleports the gripper near it.
+	// AlignStartDistance is the maximum initial carriage-to-object offset for
+	// lesson 1. The reset chooses a side with equal probability and then samples
+	// a detached offset up to this limit.
 	AlignStartDistance       float64
 	AlignStartDistanceJitter float64
 	// GraspStartDistance and GraspStartHeightOffset define a detached, nearby
@@ -355,11 +355,11 @@ func DefaultConfig() Config {
 			// A short secure hold verifies a real attachment before lift, without
 			// making the early curriculum excessively sparse.
 			GraspHoldSeconds: 2,
-			// Start close enough to make horizontal approach learnable, but never
-			// inside tolerance/contact. The random side prevents a fixed left/right
-			// shortcut from becoming a valid policy.
-			AlignStartDistance:       0.75,
-			AlignStartDistanceJitter: 0.15,
+			// Start with a narrow, symmetric +/-1m approach distribution. This
+			// maximum can be increased in a later curriculum experiment without
+			// ever spawning contact or attachment.
+			AlignStartDistance:       1.0,
+			AlignStartDistanceJitter: 0,
 			// Grasp begins close to, but deliberately outside, the physical
 			// contact tolerances. This keeps the lesson focused on the grasp
 			// rather than repeatedly relearning the already mastered approach.

@@ -25,6 +25,9 @@ func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
 	if PhaseFromNormalized(observation[observationPhase]) != PhaseApproachObject {
 		t.Fatalf("observation phase = %v", observation[observationPhase])
 	}
+	if observation[observationAlignedX] != -1 || observation[observationInGraspZone] != -1 || observation[observationLastActionHorizontal] != 0 || observation[observationLastActionVertical] != 0 || observation[observationLastActionGripper] != 0 || observation[observationAlignmentGateAwarded] != -1 {
+		t.Fatalf("reset observation is missing phase gates or previous action: %v", observation)
+	}
 	for index, value := range observation {
 		if value < -1 || value > 1 || math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			t.Fatalf("observation[%d]=%v is not finite and normalized", index, value)
@@ -157,23 +160,47 @@ func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 	}
 }
 
-func TestAlignLessonUsesGraspDistanceAndChargesRemainingDistance(t *testing.T) {
+func TestPhaseOneApproachProgressRewardsEachSignedHorizontalReduction(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	config.Curriculum.Stage = CurriculumAlignAndContact
+	config.Reward.AlignmentPotentialScale = 100 // Must not affect transition shaping.
 	environment := newEnvironment(2, config)
 	previous := State{Phase: PhaseApproachObject, CarriageX: 2, GripperY: 1, ObjectX: 1, ObjectY: 0.425}
 	environment.state = previous
-	environment.state.CarriageX = 1.9
+	environment.state.CarriageX = 1.999
 	closer := environment.reward(previous, 0, 0, 0)
-	environment.state.CarriageX = 2.1
+	environment.state.CarriageX = 2.001
 	away := environment.reward(previous, 0, 0, 0)
-	if closer.Approach <= away.Approach || closer.Total <= away.Total {
-		t.Fatalf("align reward must prefer reducing grasp-pose distance: closer=%#v away=%#v", closer, away)
+	if want := config.Reward.ApproachProgressScale * 0.001; math.Abs(closer.Approach-want) > 1e-9 {
+		t.Fatalf("one-millimetre approach reward = %v, want %v", closer.Approach, want)
+	}
+	if want := -config.Reward.ApproachProgressScale * 0.001; math.Abs(away.Approach-want) > 1e-9 {
+		t.Fatalf("one-millimetre retreat reward = %v, want %v", away.Approach, want)
+	}
+	if closer.Total <= away.Total {
+		t.Fatalf("horizontal reduction must beat retreat: closer=%#v away=%#v", closer, away)
 	}
 }
 
-func TestAlignLessonCannotFarmRewardByReturningToAnOldBest(t *testing.T) {
+func TestObservationNormalizesSignedHorizontalErrorAgainstWorkspaceLength(t *testing.T) {
+	config := DefaultConfig()
+	config.Workspace.MinX = 10
+	config.Workspace.MaxX = 16
+	environment := newEnvironment(4, config)
+	environment.state = State{CarriageX: 10, ObjectX: 16, TargetX: 10}
+	leftOfObject := environment.observation()
+	if got := leftOfObject[observationGripperFromObjectX]; math.Abs(float64(got+1)) > 1e-6 {
+		t.Fatalf("signed X error at -workspace length = %v, want -1", got)
+	}
+	environment.state.CarriageX, environment.state.ObjectX = 16, 10
+	rightOfObject := environment.observation()
+	if got := rightOfObject[observationGripperFromObjectX]; math.Abs(float64(got-1)) > 1e-6 {
+		t.Fatalf("signed X error at +workspace length = %v, want +1", got)
+	}
+}
+
+func TestPhaseOneAlignmentRewardIsMarkovian(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	config.Curriculum.Stage = CurriculumAlignAndContact
@@ -181,15 +208,10 @@ func TestAlignLessonCannotFarmRewardByReturningToAnOldBest(t *testing.T) {
 	previous := State{Phase: PhaseApproachObject, CarriageX: 2, GripperY: 1, ObjectX: 1, ObjectY: 0.425}
 	environment.state = previous
 	environment.state.CarriageX = 1.8
-	_ = environment.reward(previous, 0, 0, 0)
-	previous = environment.state
-	environment.state.CarriageX = 2.0
-	_ = environment.reward(previous, 0, 0, 0)
-	previous = environment.state
-	environment.state.CarriageX = 1.8
-	returned := environment.reward(previous, 0, 0, 0)
-	if returned.Approach != 0 {
-		t.Fatalf("returning to an old best distance was rewarded: %#v", returned)
+	first := environment.reward(previous, 0, 0, 0)
+	second := environment.reward(previous, 0, 0, 0)
+	if first.Approach != second.Approach || first.Total != second.Total {
+		t.Fatalf("same transition produced history-dependent reward: first=%#v second=%#v", first, second)
 	}
 }
 
@@ -679,8 +701,12 @@ func TestAlignLessonStartsNearButDetachedAndAwardsOnlyContact(t *testing.T) {
 		t.Fatalf("align reset fabricated contact or attachment: %#v", task.environment.state.Grip)
 	}
 	verticalDistance := math.Abs(task.environment.state.GripperY - task.environment.objectGripHeight())
-	if verticalDistance <= config.GraspVerticalTolerance || verticalDistance > config.Curriculum.ContactStartHeightOffset+config.Curriculum.Randomization.ContactStartHeightJitter+1e-9 {
-		t.Fatalf("align reset vertical distance=%v, expected nearby but detached", verticalDistance)
+	if verticalDistance < config.Curriculum.ContactStartHeightOffset {
+		t.Fatalf("align reset vertical distance=%v, expected a high detached start", verticalDistance)
+	}
+	bounds := SafeGripperBounds(config, task.environment.state.CarriageX)
+	if task.environment.state.GripperY < bounds.MinY || task.environment.state.GripperY > bounds.MaxY {
+		t.Fatalf("align reset gripper Y=%v escaped safe bounds=%#v", task.environment.state.GripperY, bounds)
 	}
 	driveToContact(t, task)
 	if task.environment.lastReward.Contact != config.Reward.SuccessfulContactReward || task.environment.lastReward.Success != 0 {
@@ -711,7 +737,7 @@ func TestGraspLessonStartsNearThePoseButDetached(t *testing.T) {
 	}
 }
 
-func TestContactClosureRewardIsOneTimeInGraspLesson(t *testing.T) {
+func TestContactTransitionRewardIsMarkovian(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	config.Curriculum.Stage = CurriculumGrasp
@@ -723,8 +749,8 @@ func TestContactClosureRewardIsOneTimeInGraspLesson(t *testing.T) {
 	}
 	first := environment.reward(previous, 0, 0, 0)
 	second := environment.reward(previous, 0, 0, 0)
-	if first.Contact != config.Reward.ContactClosureReward || second.Contact != 0 {
-		t.Fatalf("contact reward must be a one-time grasp event: first=%#v second=%#v", first, second)
+	if first.Contact != config.Reward.ContactClosureReward || second.Contact != config.Reward.ContactClosureReward {
+		t.Fatalf("the same contact transition must have the same Markov reward: first=%#v second=%#v", first, second)
 	}
 }
 
@@ -1302,28 +1328,18 @@ func TestApproachPhaseRequiresStableAlignment(t *testing.T) {
 	}
 }
 
-func TestRewardRewardsStableAlignmentNearTarget(t *testing.T) {
+func TestPhaseTwoHoverIsPenalized(t *testing.T) {
 	config := DefaultConfig()
-	config.HorizontalTolerance = 0.15
-	config.AlignmentEnterTolerance = 0.15
-	config.AlignmentExitTolerance = 0.25
-	config.StableVelocityThreshold = 0.05
-	config.Reward.ApproachProgressScale = 3.0
-	config.Reward.AlignedPositionReward = 0.01
-	config.Reward.StableAlignmentReward = 0.05
-	config.Reward.AlignmentVelocityPenalty = 0.05
-	config.Reward.ActionNearTargetPenalty = 0.02
-	config.Reward.InactivityPenalty = -0.005
-
+	config.Homeostasis.Enabled = false
+	config.Reward.AlignmentEpsilonX = 0.03
+	config.Reward.GraspZoneToleranceY = 0.02
+	config.Reward.HoverVelocityThreshold = 0.05
 	env := newEnvironment(100, config)
-	e := State{CarriageX: 0.12, ObjectX: 0, CarriageVelocityX: 0.02, Phase: PhaseApproachObject}
-	env.state = State{CarriageX: 0.10, ObjectX: 0, CarriageVelocityX: 0.02, Phase: PhaseApproachObject}
-	reward := env.reward(e, 0.8, 0.8, 0)
-	if reward.Approach <= config.Reward.StableAlignmentReward {
-		t.Fatalf("stable alignment reward too small: %#v", reward)
-	}
-	if reward.Approach <= 0 {
-		t.Fatalf("near-target alignment should be rewarded: %#v", reward)
+	previous := State{CarriageX: 0.01, ObjectX: 0, ObjectY: 0.425, GripperY: 1.2, Phase: PhaseLowerToObject}
+	env.state = previous
+	reward := env.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if reward.Hover >= 0 || reward.Total >= config.Reward.TimePenalty {
+		t.Fatalf("stationary aligned hover was not penalized: %#v", reward)
 	}
 }
 

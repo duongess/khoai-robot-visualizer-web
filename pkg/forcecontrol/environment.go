@@ -8,12 +8,12 @@ import (
 )
 
 // ObservationDimension is the fixed goal-conditioned policy input size.
-const ObservationDimension = 23
+const ObservationDimension = 29
 
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 18
+const CoordinateSystemVersion = 21
 
 const (
 	observationGripperX = iota
@@ -26,8 +26,8 @@ const (
 	observationObjectVelocityY
 	observationTargetX
 	observationTargetY
-	observationObjectFromGripperX
-	observationObjectFromGripperY
+	observationGripperFromObjectX
+	observationGripperFromObjectY
 	observationTargetFromObjectX
 	observationTargetFromObjectY
 	observationGripperClosed
@@ -39,6 +39,12 @@ const (
 	observationContactDetected
 	observationRequiredGripForceBaseline
 	observationEnergy
+	observationAlignedX
+	observationInGraspZone
+	observationLastActionHorizontal
+	observationLastActionVertical
+	observationLastActionGripper
+	observationAlignmentGateAwarded
 )
 
 // GripState distinguishes a command to close the gripper from physical object
@@ -63,6 +69,9 @@ type RewardBreakdown struct {
 	Homeostasis   float64
 	DetachedForce float64
 	BreakRisk     float64
+	Descent       float64
+	Hover         float64
+	Smoothness    float64
 	Penalty       float64
 	Total         float64
 }
@@ -168,13 +177,12 @@ type Environment struct {
 	successRewardAwarded           bool
 	failureReason                  string
 	lastReward                     RewardBreakdown
-	lastGripRateAction             float64
+	lastAppliedAction              [3]float64
+	alignmentGateAwarded           bool
+	hoverPenaltyAccumulated        float64
 	deadZoneRemoved                [3]bool
 	filterDeadZoneRemoved          [3]bool
 	filteredAction                 [3]float64
-	bestApproachDistance           float64
-	bestHorizontalDistance         float64
-	bestLoweringError              float64
 	verticalAcceleration           float64
 	invalidContactFrames           int
 	slipFrames                     int
@@ -212,7 +220,7 @@ func newEnvironment(seed int64, config Config) *Environment {
 		stage = CurriculumAlignAndContact
 	}
 	baseTerrain := append([]TerrainPoint(nil), config.Terrain...)
-	return &Environment{config: config, baseTerrain: baseTerrain, seed: seed, random: rand.New(rand.NewSource(seed)), activeCurriculumStage: stage, bestApproachDistance: math.Inf(1), bestHorizontalDistance: math.Inf(1), bestLoweringError: math.Inf(1)}
+	return &Environment{config: config, baseTerrain: baseTerrain, seed: seed, random: rand.New(rand.NewSource(seed)), activeCurriculumStage: stage}
 }
 
 func (e *Environment) reset() State {
@@ -262,13 +270,12 @@ func (e *Environment) reset() State {
 	e.successRewardAwarded = false
 	e.failureReason = ""
 	e.lastReward = RewardBreakdown{}
-	e.lastGripRateAction = 0
+	e.lastAppliedAction = [3]float64{}
+	e.alignmentGateAwarded = false
+	e.hoverPenaltyAccumulated = 0
 	e.deadZoneRemoved = [3]bool{}
 	e.filterDeadZoneRemoved = [3]bool{}
 	e.filteredAction = [3]float64{}
-	e.bestApproachDistance = math.Inf(1)
-	e.bestHorizontalDistance = math.Inf(1)
-	e.bestLoweringError = math.Inf(1)
 	e.verticalAcceleration = 0
 	e.invalidContactFrames = 0
 	e.slipFrames = 0
@@ -281,9 +288,6 @@ func (e *Environment) reset() State {
 	e.contactStableFrames = 0
 	e.secureGripHoldFrames = 0
 	e.applyCurriculumReset()
-	e.bestApproachDistance = e.graspPoseDistanceFor(e.state)
-	e.bestHorizontalDistance = math.Abs(e.state.CarriageX - e.state.ObjectX)
-	e.bestLoweringError = e.loweringErrorFor(e.state)
 	e.resetCount++
 	e.ready = true
 	return e.state
@@ -319,18 +323,16 @@ func (e *Environment) placeNearObjectForAlignLesson() {
 	e.state.CarriageVelocityX = 0
 	_, _, minimumY, maximumY := e.safeBounds()
 	graspY := e.objectGripHeight()
-	minimumHeightOffset := e.config.GraspVerticalTolerance + 0.05
-	heightOffset := math.Max(minimumHeightOffset, e.config.Curriculum.ContactStartHeightOffset+e.symmetricJitter(e.config.Curriculum.Randomization.ContactStartHeightJitter))
-	minimumStartY := clamp(graspY+heightOffset, minimumY, maximumY)
-	maximumHeightOffset := math.Max(heightOffset, e.config.Curriculum.ContactStartHeightOffset+math.Abs(e.config.Curriculum.Randomization.ContactStartHeightJitter))
-	maximumStartY := clamp(graspY+maximumHeightOffset, minimumY, maximumY)
-	// Randomize within a nearby vertical band rather than placing the gripper
-	// anywhere in the gantry. The policy still has to descend, but every reset
-	// supplies a learnable grasp-pose problem instead of a long hover episode.
+	// Lesson 1 begins from a visibly high, random gantry pose. The old
+	// grasp-height band was only 0.15--0.30m above a floor object, which made a
+	// reset look as though the robot had already descended. InitialGripperY is
+	// the operator-configured nominal start height; randomize nearby while also
+	// retaining a physical clearance above the grasp pose.
+	nominalStartY := clamp(e.config.InitialGripperY, minimumY, maximumY)
+	minimumStartY := math.Max(graspY+e.config.Curriculum.ContactStartHeightOffset, nominalStartY-0.40)
+	minimumStartY = clamp(minimumStartY, minimumY, maximumY)
+	maximumStartY := clamp(nominalStartY+0.20, minimumStartY, maximumY)
 	e.state.GripperY = minimumStartY + e.random.Float64()*(maximumStartY-minimumStartY)
-	if math.Abs(e.state.GripperY-graspY) <= e.config.GraspVerticalTolerance {
-		e.state.GripperY = clamp(graspY+minimumHeightOffset, minimumY, maximumY)
-	}
 	e.state.GripperVelocityY = 0
 }
 
@@ -478,7 +480,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 
 	filteredValues := e.filterAction(values)
 	previous := e.state
-	previousGripRateAction := e.lastGripRateAction
+	previousAction := e.lastAppliedAction
 	e.contactBeforeMotion = e.contactDetected()
 	e.state.BoundaryHit = false
 	e.applyHorizontalControl(filteredValues[0])
@@ -493,7 +495,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	}
 	e.releaseCommanded = false
 	e.applyGripControl(filteredValues[2])
-	e.lastGripRateAction = filteredValues[2]
+	e.lastAppliedAction = filteredValues
 	e.updateGripState()
 	if e.state.Grip.ObjectAttached {
 		e.wasEverGrasped = true
@@ -515,7 +517,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		e.resetContactSuccessStreakOnFailure()
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
 		e.updateHomeostasis(terminalReason)
-		e.lastReward = e.reward(previous, filteredValues[0], filteredValues[2], previousGripRateAction)
+		e.lastReward = e.rewardWithActions(previous, filteredValues, previousAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
 		e.lastReward.Total += e.failurePenalty(terminalReason)
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
@@ -523,7 +525,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.updatePhase(previous)
 	e.updateHomeostasis("")
 	if e.state.Phase == PhaseSuccess {
-		e.lastReward = e.reward(previous, filteredValues[0], filteredValues[2], previousGripRateAction)
+		e.lastReward = e.rewardWithActions(previous, filteredValues, previousAction)
 		if !e.successRewardAwarded {
 			switch e.currentCurriculumStage() {
 			case CurriculumAlignAndContact:
@@ -545,7 +547,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
-	e.lastReward = e.reward(previous, filteredValues[0], filteredValues[2], previousGripRateAction)
+	e.lastReward = e.rewardWithActions(previous, filteredValues, previousAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
 }
 
@@ -627,7 +629,7 @@ func (e *Environment) applyHorizontalControl(value float64) {
 	// noisy policy sign changes cannot make it oscillate over the object.
 	if !e.state.Grip.ObjectAttached &&
 		(e.state.Phase == PhaseLowerToObject || e.state.Phase == PhaseGripObject) &&
-		math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.AlignmentExitTolerance {
+		math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.Reward.AlignmentEpsilonX {
 		value = 0
 	}
 	targetVelocity := value * e.config.MaxHorizontalSpeed
@@ -646,7 +648,7 @@ func (e *Environment) applyVerticalControl(value float64) {
 	// the actor changes force. This removes the common hover/lower oscillation:
 	// tiny alternating Y actions cannot repeatedly leave and re-enter contact.
 	if !e.state.Grip.ObjectAttached && e.state.Phase == PhaseGripObject &&
-		math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.VerticalTolerance {
+		math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.Reward.GraspZoneToleranceY {
 		value = 0
 	}
 	targetVelocity := value * e.config.MaxVerticalSpeed
@@ -910,119 +912,64 @@ func (e *Environment) updateStandardPhase(previous State) {
 	}
 }
 
+// reward is retained for focused legacy tests. Production stepping uses
+// rewardWithActions so the full three-dimensional action and its predecessor
+// are available for Markovian smoothness regularization.
 func (e *Environment) reward(previous State, horizontalAction, gripRateAction, previousGripRateAction float64) RewardBreakdown {
+	return e.rewardWithActions(previous, [3]float64{horizontalAction, 0, gripRateAction}, [3]float64{0, 0, previousGripRateAction})
+}
+
+func (e *Environment) rewardWithActions(previous State, action, previousAction [3]float64) RewardBreakdown {
 	breakdown := RewardBreakdown{Homeostasis: e.lastEnergyDelta}
-	// The enabled homeostatic decay replaces the ordinary time penalty so an
-	// idle step has one clear, visible baseline cost instead of two.
-	if !e.config.Homeostasis.Enabled {
-		breakdown.Penalty = e.config.Reward.TimePenalty
-	}
+	// Time cost is always present. Homeostasis is an additional motivation
+	// signal, not a replacement that can make hovering cost-free.
+	breakdown.Penalty = e.config.Reward.TimePenalty
 	attached := e.state.Grip.ObjectAttached
 	stage := e.currentCurriculumStage()
-	if stage == CurriculumAlignAndContact && !attached && previous.Phase != PhaseGripObject {
-		// Lesson 1 has one objective: reduce the Euclidean distance to the
-		// physical grasp pose. The small absolute-distance cost makes remaining
-		// far away expensive; only a new best distance earns progress, so
-		// returning to an old position cannot be used to farm reward.
-		previousDistance := e.graspPoseDistanceFor(previous)
-		currentDistance := e.graspPoseDistanceFor(e.state)
-		// Use a monotonic potential for the lesson. Once a distance has been
-		// improved, moving away cannot create a new positive delta when the
-		// policy returns; only a genuinely new best distance is rewarded.
-		if math.IsInf(e.bestApproachDistance, 1) {
-			e.bestApproachDistance = previousDistance
-		}
-		if currentDistance < e.bestApproachDistance {
-			breakdown.Approach = e.config.Reward.ApproachProgressScale * (e.bestApproachDistance - currentDistance)
-			e.bestApproachDistance = currentDistance
-		} else {
-			breakdown.Approach = 0
-		}
-		breakdown.Penalty -= e.config.Reward.AlignDistancePenaltyScale * currentDistance
-		if currentDistance >= previousDistance-1e-6 {
-			breakdown.Penalty += e.config.Reward.ApproachStallPenalty
-		}
-	} else if previous.Phase == PhaseApproachObject && !attached {
-		previousHorizontal := math.Abs(previous.CarriageX - previous.ObjectX)
-		currentHorizontal := math.Abs(e.state.CarriageX - e.state.ObjectX)
-		if math.IsInf(e.bestHorizontalDistance, 1) {
-			e.bestHorizontalDistance = previousHorizontal
-		}
-		if currentHorizontal < e.bestHorizontalDistance {
-			breakdown.Approach = e.config.Reward.ApproachProgressScale * (e.bestHorizontalDistance - currentHorizontal)
-			e.bestHorizontalDistance = currentHorizontal
-		}
-		if previousHorizontal > e.config.HorizontalTolerance && currentHorizontal >= previousHorizontal-1e-6 {
-			breakdown.Penalty += e.config.Reward.ApproachStallPenalty
-		}
-		if previousHorizontal <= e.config.AlignmentEnterTolerance && math.Abs(horizontalAction) > 1e-6 && progress <= 0 {
-			// Near the object, a side-to-side move is not a valid approach. It
-			// must either reduce X error or be scored as a strong stall.
-			breakdown.Approach = 0
-			breakdown.Penalty += 4 * e.config.Reward.ApproachStallPenalty
+	if !attached {
+		currentDX := math.Abs(e.state.CarriageX - e.state.ObjectX)
+		previousDX := math.Abs(previous.CarriageX - previous.ObjectX)
+		currentDY := e.graspGuideErrorFor(e.state)
+		previousDY := e.graspGuideErrorFor(previous)
+		switch {
+		case currentDX > e.config.Reward.AlignmentEpsilonX:
+			// Phase 1: reward the signed reduction in horizontal error over this
+			// transition. Unlike a tanh(distance) potential, this remains useful
+			// across the full rail: toward is positive, retreat is negative.
+			deltaDX := previousDX - currentDX
+			breakdown.Approach += e.config.Reward.ApproachProgressScale * deltaDX
+			// Penalize only the downward displacement in this transition. Using
+			// s_t and s_(t+1) preserves the Markov property even with randomized
+			// episode starts.
+			prematureDescent := math.Max(0, previous.GripperY-e.state.GripperY)
+			breakdown.Penalty -= e.config.Reward.PrematureLoweringPenaltyScale * prematureDescent
+		case currentDY > e.config.Reward.GraspZoneToleranceY:
+			// Phase 2: the one-time event bit is exposed in the observation, so
+			// this augmented state remains Markovian.
+			if previousDX > e.config.Reward.AlignmentEpsilonX && !e.alignmentGateAwarded {
+				breakdown.Contact += e.config.Reward.AlignmentGateBonus
+				e.alignmentGateAwarded = true
+			}
+			breakdown.Descent = e.config.Reward.DescentProgressScale * (previousDY - currentDY)
+			if math.Abs(e.state.GripperVelocityY) < e.config.Reward.HoverVelocityThreshold {
+				breakdown.Hover = -e.config.Reward.HoverPenalty
+				breakdown.Penalty += breakdown.Hover
+				e.hoverPenaltyAccumulated -= breakdown.Hover
+			}
+			// Phase 3 has no approach reward: force/contact feedback below decides
+			// whether a real grasp was made.
 		}
 	}
-	if stage != CurriculumAlignAndContact && previous.Phase == PhaseLowerToObject && !attached {
-		// Horizontal alignment is already the entry condition for this phase.
-		// Score only the remaining vertical grasp error, otherwise small X-axis
-		// dithering can masquerade as progress while the gripper stays high.
-		previousError := e.loweringErrorFor(previous)
-		currentError := e.loweringErrorFor(e.state)
-		previousHorizontal := math.Abs(previous.CarriageX - previous.ObjectX)
-		currentHorizontal := math.Abs(e.state.CarriageX - e.state.ObjectX)
-		if previousHorizontal <= e.config.AlignmentEnterTolerance && currentHorizontal >= previousHorizontal-1e-6 && math.Abs(horizontalAction) > 1e-6 {
-			breakdown.Approach = 0
-			breakdown.Penalty += 4 * e.config.Reward.LowerStallPenalty
-		} else {
-			if math.IsInf(e.bestLoweringError, 1) {
-				e.bestLoweringError = previousError
-			}
-			if currentError < e.bestLoweringError {
-				breakdown.Approach = e.config.Reward.LowerProgressScale * (e.bestLoweringError - currentError)
-				e.bestLoweringError = currentError
-			}
-		}
-		if currentError >= previousError-1e-6 {
-			breakdown.Penalty += e.config.Reward.LowerStallPenalty
-		}
-	}
-	// Alignment is a breadcrumb only while approaching horizontally. Once the
-	// task has entered LowerToObject, paying it again creates a hover optimum:
-	// the actor can remain above the object and avoid attempting the harder
-	// vertical contact action. Lowering has its own signed vertical-progress
-	// reward and stall penalty below.
-	if stage != CurriculumAlignAndContact && !attached && previous.Phase == PhaseApproachObject {
-		xError := math.Abs(e.state.CarriageX - e.state.ObjectX)
-		if xError <= e.config.AlignmentEnterTolerance {
-			// Near-object alignment is only a tiny breadcrumb toward the real
-			// objective. A hover-by-the-object equilibrium must not outrank a true
-			// contact and secure hold.
-			breakdown.Approach += e.config.Reward.AlignedPositionReward
-			breakdown.Approach -= e.config.Reward.AlignmentVelocityPenalty * math.Abs(e.state.CarriageVelocityX)
-			if math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
-				breakdown.Approach += e.config.Reward.StableAlignmentReward
-			}
-			if xError <= e.config.HorizontalTolerance {
-				breakdown.Penalty -= e.config.Reward.ActionNearTargetPenalty * math.Abs(horizontalAction)
-			}
-			if xError <= e.config.HorizontalTolerance && math.Abs(horizontalAction) > 0 || xError <= e.config.AlignmentEnterTolerance && math.Abs(e.state.CarriageVelocityX) > e.config.StableVelocityThreshold {
-				breakdown.Approach = math.Min(breakdown.Approach, 0.01)
-			}
-		}
-	}
-	if (stage == CurriculumGrasp || stage == CurriculumFullPickAndPlace) && !e.contactClosureRewardAwarded &&
-		e.state.Grip.GripperClosed && e.state.Grip.ContactDetected && !attached && !e.state.Grip.Slipping &&
-		(previous.Phase == PhaseLowerToObject || previous.Phase == PhaseGripObject || e.state.Phase == PhaseGripObject) {
-		// Only count a contact-only closure when the end-effector has actually
-		// entered the grasping slice of the curriculum. A closed gripper still
-		// hovering in the approach phase is not a valid grasp success signal and
-		// therefore should not earn the same bonus as a real contact event.
+	breakdown.Smoothness = -e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(action) -
+		e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(action, previousAction)
+	breakdown.Penalty += breakdown.Smoothness
+	if !previous.Grip.ContactDetected && e.state.Grip.ContactDetected && e.state.Grip.GripperClosed && !attached && !e.state.Grip.Slipping && e.rewardPhaseID(e.state) == 3 {
+		// A contact reward is a visible state transition, not a historical
+		// "already rewarded" flag. Closing far above the object cannot qualify.
 		breakdown.Contact += e.config.Reward.ContactClosureReward
-		e.contactClosureRewardAwarded = true
 	}
-	if stage != CurriculumAlignAndContact && attached && !e.gripBonusAwarded {
+	if stage != CurriculumAlignAndContact && !previous.Grip.ObjectAttached && attached {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
-		e.gripBonusAwarded = true
 	}
 	if stage == CurriculumGrasp && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
 		// Only the isolated grasp lesson rewards elapsed holding time. In the full
@@ -1042,7 +989,7 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * deliveryDelta
 	}
 	if previous.Grip.ObjectAttached && attached && previous.Phase != PhaseReleaseObject {
-		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(gripRateAction-previousGripRateAction)
+		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(action[2]-previousAction[2])
 		breakdown.Penalty -= e.config.Reward.GripForceChangePenaltyScale * math.Abs(e.state.GripForce-previous.GripForce)
 		if e.state.Grip.Slipping {
 			breakdown.Penalty += e.config.Reward.SlipPenalty
@@ -1062,9 +1009,8 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 			breakdown.Penalty += breakdown.BreakRisk
 		}
 	}
-	if e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected && !e.invalidGripPenaltyAwarded {
+	if !previous.Grip.GripperClosed && e.state.Grip.GripperClosed && !e.state.Grip.ContactDetected {
 		breakdown.Penalty += e.config.Reward.InvalidGripPenalty
-		e.invalidGripPenaltyAwarded = true
 	}
 	// Closing in empty space remains costly on every step. The one-time event
 	// penalty above marks the mistake; this small continuing cost prevents an
@@ -1082,13 +1028,6 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 		breakdown.DetachedForce = e.config.Reward.DetachedExcessForcePenalty * ratio * ratio
 		breakdown.Penalty += breakdown.DetachedForce
 	}
-	// Exact idling in the horizontal approach phase remains costly. The lowering
-	// phase has the stricter vertical-progress penalty above, so X motion cannot
-	// avoid it.
-	if !attached && previous.Phase == PhaseApproachObject &&
-		math.Abs(e.state.CarriageX-previous.CarriageX) < 1e-9 && math.Abs(e.state.GripperY-previous.GripperY) < 1e-9 {
-		breakdown.Penalty += e.config.Reward.InactivityPenalty
-	}
 	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !attached {
 		// Force must converge to the attachment threshold. Signed progress makes
 		// oscillating above and below the threshold non-profitable, while the
@@ -1097,9 +1036,8 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 		previousGap := math.Max(0, e.requiredForce()-previous.GripForce)
 		currentGap := math.Max(0, e.requiredForce()-e.state.GripForce)
 		breakdown.Grip += e.config.Reward.GripForceProgressScale * (previousGap - currentGap)
-		if !e.state.Grip.ForceValid && !e.insufficientGripPenaltyAwarded {
+		if !e.state.Grip.ForceValid && !previous.Grip.GripperClosed {
 			breakdown.Penalty += e.config.Reward.InsufficientGripPenalty
-			e.insufficientGripPenaltyAwarded = true
 		}
 		breakdown.Penalty += e.config.Reward.InsufficientGripStepPenalty
 	}
@@ -1110,7 +1048,7 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 	if e.state.BoundaryHit {
 		breakdown.Penalty += e.config.Reward.BoundaryCollisionPenalty
 	}
-	breakdown.Total = breakdown.Approach + breakdown.Contact + breakdown.Grip + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
+	breakdown.Total = breakdown.Approach + breakdown.Contact + breakdown.Grip + breakdown.Descent + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
 	return breakdown
 }
 
@@ -1217,6 +1155,7 @@ func (e *Environment) curriculumStageCode() int {
 
 func (e *Environment) observation() []float32 {
 	state := e.state
+	workspaceLengthX := e.config.Workspace.MaxX - e.config.Workspace.MinX
 	values := []float64{
 		normalize(state.CarriageX, e.config.Workspace.MinX, e.config.Workspace.MaxX),
 		normalize(state.GripperY, e.config.Workspace.MinY, e.config.Workspace.MaxY),
@@ -1228,9 +1167,9 @@ func (e *Environment) observation() []float32 {
 		normalize(state.ObjectVelocityY, -2*e.config.Gravity, 2*e.config.Gravity),
 		normalize(state.TargetX, e.config.Workspace.MinX, e.config.Workspace.MaxX),
 		normalize(state.TargetY, e.config.Workspace.MinY, e.config.Workspace.MaxY),
-		normalize(state.ObjectX-state.CarriageX, -e.config.Workspace.MaxX, e.config.Workspace.MaxX),
-		normalize(state.ObjectY-state.GripperY, -e.config.Workspace.MaxY, e.config.Workspace.MaxY),
-		normalize(state.TargetX-state.ObjectX, -e.config.Workspace.MaxX, e.config.Workspace.MaxX),
+		normalize(state.CarriageX-state.ObjectX, -workspaceLengthX, workspaceLengthX),
+		normalize(state.GripperY-e.objectGripHeightFor(state), -e.config.Workspace.MaxY, e.config.Workspace.MaxY),
+		normalize(state.TargetX-state.ObjectX, -workspaceLengthX, workspaceLengthX),
 		normalize(state.TargetY-state.ObjectY, -e.config.Workspace.MaxY, e.config.Workspace.MaxY),
 		normalize01(1 - state.GripperOpening),
 		boolValue(state.Grip.ObjectAttached),
@@ -1241,6 +1180,12 @@ func (e *Environment) observation() []float32 {
 		boolValue(state.Grip.ContactDetected),
 		e.requiredGripForceBaseline(),
 		normalize01(state.Energy),
+		boolValue(math.Abs(state.CarriageX-state.ObjectX) <= e.config.Reward.AlignmentEpsilonX),
+		boolValue(e.graspGuideErrorFor(state) <= e.config.Reward.GraspZoneToleranceY),
+		e.lastAppliedAction[0],
+		e.lastAppliedAction[1],
+		e.lastAppliedAction[2],
+		boolValue(e.alignmentGateAwarded),
 	}
 	result := make([]float32, len(values))
 	for index, value := range values {
@@ -1276,6 +1221,31 @@ func (e *Environment) graspPoseDistanceFor(state State) float64 {
 
 func (e *Environment) loweringErrorFor(state State) float64 {
 	return math.Abs(state.GripperY - e.objectGripHeightFor(state))
+}
+
+// graspGuideErrorFor is the geometry-aware vertical error used by reward and
+// observations. It compares the gripper guide with the object's grasp guide,
+// rather than raw object-centre Y coordinates with incompatible origins.
+func (e *Environment) graspGuideErrorFor(state State) float64 {
+	return math.Abs(state.GripperY - e.objectGripHeightFor(state))
+}
+
+func (e *Environment) rewardPhaseID(state State) int {
+	if math.Abs(state.CarriageX-state.ObjectX) > e.config.Reward.AlignmentEpsilonX {
+		return 1
+	}
+	if e.graspGuideErrorFor(state) > e.config.Reward.GraspZoneToleranceY {
+		return 2
+	}
+	return 3
+}
+
+func actionSquared(action [3]float64) float64 {
+	return action[0]*action[0] + action[1]*action[1] + action[2]*action[2]
+}
+
+func actionSquaredDifference(action, previous [3]float64) float64 {
+	return actionSquared([3]float64{action[0] - previous[0], action[1] - previous[1], action[2] - previous[2]})
 }
 
 func (e *Environment) requiredCarryHeight() float64 {

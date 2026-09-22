@@ -2,6 +2,7 @@ package forcecontrol
 
 import (
 	"errors"
+	"math"
 
 	"github.com/duongess/khoai-robot-control-framework/pkg/framework"
 )
@@ -109,6 +110,10 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"gripper_velocity_y":           float32(state.GripperVelocityY),
 		"gripper_to_object_error_x":    float32(state.ObjectX - state.CarriageX),
 		"gripper_to_object_error_y":    float32(t.environment.objectGripHeightFor(state) - state.GripperY),
+		"phase_id":                     float32(t.environment.rewardPhaseID(state)),
+		"dx_error":                     float32(math.Abs(state.CarriageX - state.ObjectX)),
+		"dy_error":                     float32(t.environment.graspGuideErrorFor(state)),
+		"hover_penalty_accumulated":    float32(t.environment.hoverPenaltyAccumulated),
 		"vertical_acceleration":        float32(t.environment.verticalAcceleration),
 		"required_grip_force":          float32(t.environment.requiredForce()),
 		"invalid_contact_frames":       float32(t.environment.invalidContactFrames),
@@ -125,12 +130,11 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"object_broken":                float32(boolToFloat(state.ObjectBroken)),
 		"object_stable":                float32(boolToFloat(t.environment.objectStable())),
 		"gripper_to_object_distance":   float32(gripperObjectDistance(state)),
-		"grasp_pose_distance":           float32(t.environment.graspPoseDistanceFor(state)),
-		"best_grasp_pose_distance":      float32(t.environment.bestApproachDistance),
-		"best_horizontal_distance":      float32(t.environment.bestHorizontalDistance),
-		"best_lowering_error":            float32(t.environment.bestLoweringError),
 		"object_to_target_distance":    float32(targetDistance(state)),
 		"approach_reward":              float32(breakdown.Approach),
+		"reward_descent_progress":      float32(breakdown.Descent),
+		"hover_penalty":                float32(breakdown.Hover),
+		"smoothness_penalty":           float32(breakdown.Smoothness),
 		"contact_reward":               float32(breakdown.Contact),
 		"grip_reward":                  float32(breakdown.Grip),
 		"lift_reward":                  float32(breakdown.Lift),

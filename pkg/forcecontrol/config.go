@@ -116,11 +116,29 @@ type CurriculumConfig struct {
 
 // RewardConfig contains the reward-shaping constants for one episode.
 type RewardConfig struct {
-	TimePenalty           float64
-	ApproachProgressScale float64
-	// AlignDistancePenaltyScale is a small per-step cost for remaining far from
-	// the grasp pose during lesson 1. Progress shaping still pays for reducing
-	// that distance, so waiting cannot become a profitable equilibrium.
+	// TimePenalty is applied on every simulation step, regardless of optional
+	// homeostatic motivation, so execution time always has a visible cost.
+	TimePenalty float64
+	// AlignmentEpsilonX and GraspZoneToleranceY are the reward gates. They are
+	// intentionally stricter than collision tolerances: the policy must center
+	// before descent, then enter the physical grasp slice.
+	AlignmentEpsilonX   float64
+	GraspZoneToleranceY float64
+	// These fields remain readable for existing launch configurations. The
+	// horizontal reward is now transition-based through ApproachProgressScale,
+	// not a saturated distance potential.
+	AlignmentPotentialScale       float64
+	AlignmentPotentialSigma       float64
+	PrematureLoweringPenaltyScale float64
+	AlignmentGateBonus            float64
+	DescentProgressScale          float64
+	HoverVelocityThreshold        float64
+	HoverPenalty                  float64
+	ActionMagnitudePenaltyScale   float64
+	ActionDeltaPenaltyScale       float64
+	// ApproachProgressScale multiplies previousDX-currentDX, so every genuine
+	// approach transition is rewarded and every retreat is penalized.
+	ApproachProgressScale     float64
 	AlignDistancePenaltyScale float64
 	// SuccessfulContactReward is a one-time terminal reward for a verified
 	// physical contact in the align-and-contact lesson. It is intentionally not
@@ -367,15 +385,27 @@ func DefaultConfig() Config {
 			EpisodeStepLimit:      250,
 		},
 		Reward: RewardConfig{
-			TimePenalty: -0.001,
-			// The first learned subgoal is horizontal object approach. Only new
-			// best-distance progress is rewarded; the time and stall costs make
-			// hovering or returning to an old position unprofitable.
+			TimePenalty:         -0.01,
+			AlignmentEpsilonX:   0.03,
+			GraspZoneToleranceY: 0.02,
+			// Horizontal shaping is transition-based through
+			// ApproachProgressScale; retain the legacy potential disabled.
+			AlignmentPotentialScale:       0,
+			AlignmentPotentialSigma:       0.25,
+			PrematureLoweringPenaltyScale: 0.15,
+			AlignmentGateBonus:            2.0,
+			DescentProgressScale:          3.0,
+			HoverVelocityThreshold:        0.03,
+			HoverPenalty:                  0.05,
+			ActionMagnitudePenaltyScale:   0.002,
+			ActionDeltaPenaltyScale:       0.01,
+			// Match vertical descent shaping so every metre of genuine approach
+			// earns an immediate, signed transition reward.
 			ApproachProgressScale:              3.0,
 			AlignDistancePenaltyScale:          0.02,
 			SuccessfulContactReward:            5.0,
 			ContactClosureReward:               2.0,
-			SuccessfulGripReward:               10.0,
+			SuccessfulGripReward:               15.0,
 			LiftProgressScale:                  2.0,
 			DeliveryProgressScale:              3.0,
 			SuccessfulPlacement:                50.0,

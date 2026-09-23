@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -35,6 +36,30 @@ func main() {
 
 	runtime := framework.NewRuntime()
 	config := forcecontrol.DefaultConfig()
+	// The demo defaults to residual control. The runtime API can switch among
+	// base-only, residual, and pure-RL without restarting this process.
+	config.Residual.Enabled = true
+	config.ControlMode = forcecontrol.ModeResidual
+	if value := os.Getenv("FORCE_CONTROL_CONTROL_MODE"); value != "" {
+		config.ControlMode = forcecontrol.ControlMode(value)
+		if !config.ControlMode.Valid() {
+			log.Fatalf("parse FORCE_CONTROL_CONTROL_MODE: want base_only, residual, or pure_rl; got %q", value)
+		}
+	}
+	if value := os.Getenv("FORCE_CONTROL_RESIDUAL_CONTROL"); value != "" {
+		enabled, parseErr := strconv.ParseBool(value)
+		if parseErr != nil {
+			log.Fatalf("parse FORCE_CONTROL_RESIDUAL_CONTROL: %v", parseErr)
+		}
+		config.Residual.Enabled = enabled
+		if os.Getenv("FORCE_CONTROL_CONTROL_MODE") == "" {
+			if enabled {
+				config.ControlMode = forcecontrol.ModeResidual
+			} else {
+				config.ControlMode = forcecontrol.ModePureRL
+			}
+		}
+	}
 	if stage := os.Getenv("FORCE_CONTROL_CURRICULUM"); stage != "" {
 		config.Curriculum.Stage = forcecontrol.CurriculumStage(stage)
 		// Any explicitly selected lesson is a training distribution rather than

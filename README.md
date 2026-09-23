@@ -38,10 +38,14 @@ progress plus the one-time `SuccessfulContactReward` after verified contact;
 object-to-target progress and the final placement reward. Force in empty space
 is penalized only when there is no physical contact.
 
-The coordinate/action/reward/reset schema is version 12. The force action is a
-continuous policy-controlled actuator rate on every step; after attachment the
-environment reports slip feedback but never selects a grip-force target. The
-analytic required force is withheld from the default 23-value policy
+The coordinate/action/reward/reset schema is version 32. The dashboard starts
+in **residual-control mode**: a deterministic FSM/PD base controller performs
+nominal approach, lower, lift, transport, and release; the three SAC outputs
+are bounded residual corrections for horizontal velocity, vertical velocity,
+and grip-force target. Telemetry exposes all three command layers as
+`base_action`, `residual_action`, and `final_action`. Set
+`FORCE_CONTROL_RESIDUAL_CONTROL=false` only for a raw-action ablation. The
+analytic required force remains withheld from the default 30-value policy
 observation and is available only through an explicit privileged baseline flag.
 SAC checkpoints are schema-aware at the learner level: a named checkpoint
 stores its observation/action dimensions and controller configuration, and is

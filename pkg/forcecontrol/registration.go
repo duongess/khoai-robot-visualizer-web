@@ -45,6 +45,19 @@ func validateRegistration(runtime *framework.Runtime, config Config) error {
 	if config.MaxGripForce <= 0 || config.MaxGripForceRate <= 0 || config.MaxHorizontalSpeed <= 0 || config.MaxVerticalSpeed <= 0 || config.MaxHorizontalAcceleration <= 0 || config.MaxVerticalAcceleration <= 0 || config.ActionSmoothingAlpha <= 0 || config.ActionSmoothingAlpha > 1 || config.TimeStep <= 0 || config.MaxEpisodeSteps <= 0 {
 		return errors.New("force-control configuration must define positive bounded motion, grip force, fixed time step, and episode length")
 	}
+	if config.ControlMode != "" && !config.ControlMode.Valid() {
+		return errors.New("force-control control mode is invalid")
+	}
+	residual := config.Residual
+	usesBaseControl := config.EffectiveControlMode() != ModePureRL
+	if usesBaseControl && (residual.ApproachGain <= 0 || residual.TransportGain <= 0 || residual.HeightGain <= 0 || residual.NominalDescentSpeed <= 0 || residual.NominalLiftSpeed <= 0 || residual.NominalReleaseSpeed <= 0 || residual.NominalGripMultiplier <= 0 || residual.AlphaX < 0 || residual.AlphaX > 1 || residual.AlphaY < 0 || residual.AlphaY > 1 || residual.AlphaGrip < 0 || residual.ForceSafetyMargin < 0 || residual.ForceSafetyMargin >= config.ObjectBreakForce || residual.SlipSeverityPenaltyScale < 0 || residual.HoldStabilityReward < 0 || residual.SecureGraspBonus < 0 || residual.DampingPenaltyScale < 0) {
+		return errors.New("force-control residual controller configuration is invalid")
+	}
+	for _, value := range []float64{residual.ApproachGain, residual.TransportGain, residual.HeightGain, residual.NominalDescentSpeed, residual.NominalLiftSpeed, residual.NominalReleaseSpeed, residual.NominalGripMultiplier, residual.AlphaX, residual.AlphaY, residual.AlphaGrip, residual.ForceSafetyMargin, residual.SlipSeverityPenaltyScale, residual.HoldStabilityReward, residual.SecureGraspBonus, residual.DampingPenaltyScale} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return errors.New("force-control residual controller values must be finite")
+		}
+	}
 	if config.ObjectWidth <= 0 || config.ObjectHeight <= 0 || config.TargetWidth <= 0 || config.ObjectFriction <= 0 || config.ObjectBreakForce <= 0 || config.GripDetachInvalidFrames <= 0 || config.SlipDetachFrames <= 0 || config.HorizontalTolerance <= 0 || config.VerticalTolerance <= 0 || config.GraspHorizontalTolerance <= 0 || config.GraspVerticalTolerance <= 0 || config.AlignmentEnterTolerance <= 0 || config.AlignmentExitTolerance <= 0 || config.AlignmentExitTolerance < config.AlignmentEnterTolerance || config.ClosedOpeningThreshold < 0 || config.ClosedOpeningThreshold > 1 || config.ReleaseActionThreshold < -1 || config.ReleaseActionThreshold >= 0 || config.StableVelocityThreshold < 0 || config.StablePlacementSteps <= 0 || config.LiftClearance < 0 || config.ReleaseTolerance <= 0 || config.ActionDeadZone < 0 || config.ActionDeadZone >= 1 {
 		return errors.New("force-control configuration contains invalid object, target, or phase tolerances")
 	}

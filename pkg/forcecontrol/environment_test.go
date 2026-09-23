@@ -238,6 +238,68 @@ func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
 	}
 }
 
+func TestResidualBaseControllerCompletesNominalPickAndPlaceAtZeroResidual(t *testing.T) {
+	config := DefaultConfig()
+	config.Residual.Enabled = true
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	config.Curriculum.Randomization.Enabled = false
+	task := NewTask(71, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	var result framework.StepResult
+	var err error
+	sawComposedGripTarget := false
+	for step := 0; step < config.MaxEpisodeSteps; step++ {
+		result, err = task.Step(framework.Action{0, 0, 0})
+		if err != nil {
+			t.Fatalf("zero-residual step %d: %v", step, err)
+		}
+		if result.Info["base_grip_target"] > 0 && result.Info["final_grip_target"] > 0 {
+			sawComposedGripTarget = true
+		}
+		if result.Done {
+			break
+		}
+	}
+	if !result.Done || result.Outcome != OutcomeSuccess {
+		t.Fatalf("zero residual did not complete nominal pick-and-place: result=%#v state=%#v", result, task.environment.state)
+	}
+	if result.Info["residual_control_enabled"] != 1 || !sawComposedGripTarget {
+		t.Fatalf("residual telemetry did not expose composed commands: %#v", result.Info)
+	}
+}
+
+func TestResidualGripCorrectionIsBoundedAndSlipRewardIsContinuous(t *testing.T) {
+	config := DefaultConfig()
+	config.Residual.Enabled = true
+	config.Homeostasis.Enabled = false
+	environment := newEnvironment(72, config)
+	environment.reset()
+	environment.state.Phase = PhaseGripObject
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ObjectAttached: true, Slipping: true}
+	environment.state.GripForce = environment.requiredForce() * 0.60
+	previous := environment.state
+
+	command := environment.composeResidualCommand([3]float64{0, 0, 1})
+	if command.gripTarget <= environment.safeBaseGripForce() || command.gripTarget > environment.state.ObjectBreakForce-config.Residual.ForceSafetyMargin+1e-9 {
+		t.Fatalf("residual grip target escaped its bounded safe band: command=%#v base=%v", command, environment.safeBaseGripForce())
+	}
+	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if reward.Penalty >= config.Reward.TimePenalty || reward.Grip != 0 {
+		t.Fatalf("slip did not receive a continuous residual penalty: %#v", reward)
+	}
+
+	previous.Grip.ForceValid = false
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	environment.state.GripForce = environment.requiredForce()
+	secured := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if secured.Grip < config.Residual.SecureGraspBonus+config.Residual.HoldStabilityReward {
+		t.Fatalf("secure-grasp transition did not earn residual bonus and hold reward: %#v", secured)
+	}
+}
+
 func TestGraspContactWithoutForceTimesOutButAlignDoesNot(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false

@@ -13,7 +13,7 @@ const ObservationDimension = 30
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 31
+const CoordinateSystemVersion = 32
 
 const (
 	observationGripperX = iota
@@ -72,6 +72,7 @@ type RewardBreakdown struct {
 	BreakRisk     float64
 	UnderGrip     float64
 	LiftStall     float64
+	Stability     float64
 	Descent       float64
 	Hover         float64
 	Smoothness    float64
@@ -189,29 +190,35 @@ type Environment struct {
 	failureReason                  string
 	lastReward                     RewardBreakdown
 	lastAppliedAction              [3]float64
-	alignmentGateAwarded           bool
-	hoverPenaltyAccumulated        float64
-	deadZoneRemoved                [3]bool
-	filterDeadZoneRemoved          [3]bool
-	filteredAction                 [3]float64
-	verticalAcceleration           float64
-	verticalRetractionBlocked      bool
-	invalidContactFrames           int
-	slipFrames                     int
-	releaseCommanded               bool
-	contactBeforeMotion            bool
-	lastEnergyDelta                float64
-	lastEnergyDecay                float64
-	lastEnergyFoodGain             float64
-	lastEnergyEvent                energyEvent
-	contactStableFrames            int
-	secureGripHoldFrames           int
-	liftHoldFrames                 int
-	contactWithoutGripFrames       int
-	contactSuccessStreak           int
-	activeCurriculumStage          CurriculumStage
-	advanceCurriculumOnReset       bool
-	resetCount                     uint64
+	// baseAction/finalAction are telemetry snapshots. Their first two entries
+	// are normalized velocity commands and their third is a force target in N.
+	// lastAppliedAction remains SAC's prior residual action for observation.
+	baseAction                [3]float64
+	residualAction            [3]float64
+	finalAction               [3]float64
+	alignmentGateAwarded      bool
+	hoverPenaltyAccumulated   float64
+	deadZoneRemoved           [3]bool
+	filterDeadZoneRemoved     [3]bool
+	filteredAction            [3]float64
+	verticalAcceleration      float64
+	verticalRetractionBlocked bool
+	invalidContactFrames      int
+	slipFrames                int
+	releaseCommanded          bool
+	contactBeforeMotion       bool
+	lastEnergyDelta           float64
+	lastEnergyDecay           float64
+	lastEnergyFoodGain        float64
+	lastEnergyEvent           energyEvent
+	contactStableFrames       int
+	secureGripHoldFrames      int
+	liftHoldFrames            int
+	contactWithoutGripFrames  int
+	contactSuccessStreak      int
+	activeCurriculumStage     CurriculumStage
+	advanceCurriculumOnReset  bool
+	resetCount                uint64
 }
 
 // energyEvent is compactly encoded for StepResult.Info while the visualizer
@@ -286,6 +293,9 @@ func (e *Environment) reset() State {
 	e.failureReason = ""
 	e.lastReward = RewardBreakdown{}
 	e.lastAppliedAction = [3]float64{}
+	e.baseAction = [3]float64{}
+	e.residualAction = [3]float64{}
+	e.finalAction = [3]float64{}
 	e.alignmentGateAwarded = false
 	e.hoverPenaltyAccumulated = 0
 	e.deadZoneRemoved = [3]bool{}
@@ -554,11 +564,28 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	filteredValues := e.filterAction(values)
 	previous := e.state
 	previousAction := e.lastAppliedAction
+	e.residualAction = filteredValues
 	e.contactBeforeMotion = e.contactDetected()
 	e.state.BoundaryHit = false
 	e.verticalRetractionBlocked = false
-	e.applyHorizontalControl(filteredValues[0])
-	e.applyVerticalControl(filteredValues[1])
+	mode := e.config.EffectiveControlMode()
+	switch mode {
+	case ModeBaseOnly, ModeResidual:
+		base := e.baseCommand()
+		command := base
+		if mode == ModeResidual {
+			command = e.composeResidualCommand(filteredValues)
+		}
+		e.baseAction = [3]float64{base.horizontal, base.vertical, base.gripTarget}
+		e.finalAction = [3]float64{command.horizontal, command.vertical, command.gripTarget}
+		e.applyHorizontalControl(command.horizontal)
+		e.applyVerticalControl(command.vertical)
+	case ModePureRL:
+		e.baseAction = [3]float64{}
+		e.finalAction = filteredValues
+		e.applyHorizontalControl(filteredValues[0])
+		e.applyVerticalControl(filteredValues[1])
+	}
 	// Only upward motion requires extra carrying force. A lower-bound collision
 	// can stop a downward carriage abruptly; treating that braking impulse as a
 	// lift demand would create a fictitious force requirement and drop a valid
@@ -568,7 +595,15 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		e.verticalAcceleration = math.Max(0, (e.state.GripperVelocityY-previous.GripperVelocityY)/e.config.TimeStep)
 	}
 	e.releaseCommanded = false
-	e.applyGripControl(filteredValues[2])
+	if mode == ModeBaseOnly || mode == ModeResidual {
+		command := e.baseCommand()
+		if mode == ModeResidual {
+			command = e.composeResidualCommand(filteredValues)
+		}
+		e.applyGripTarget(command.gripTarget, command.release)
+	} else {
+		e.applyGripControl(filteredValues[2])
+	}
 	e.lastAppliedAction = filteredValues
 	e.updateGripState()
 	e.updateContactWithoutGripCounter()
@@ -609,6 +644,15 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 			case CurriculumAlignAndContact:
 				e.lastReward.Contact = e.config.Reward.SuccessfulContactReward
 				e.lastReward.Total += e.lastReward.Contact
+			case CurriculumGrasp:
+				// Legacy direct-force training already receives its attachment
+				// event reward. Residual mode instead keeps that feedback small
+				// and awards this clean terminal grasp milestone after the
+				// configured verified hold.
+				if e.config.EffectiveControlMode() == ModeResidual {
+					e.lastReward.Success = e.config.Reward.SuccessfulGripReward
+					e.lastReward.Total += e.lastReward.Success
+				}
 			case CurriculumLift:
 				e.lastReward.Success = e.config.Reward.SuccessfulLiftReward
 				e.lastReward.Total += e.lastReward.Success
@@ -773,6 +817,23 @@ func (e *Environment) applyGripControl(value float64) {
 	// the signed actuator rate; this layer only enforces hardware/material caps.
 	deltaForce := value * e.config.MaxGripForceRate * e.config.TimeStep
 	e.state.GripForce = clamp(e.state.GripForce+deltaForce, 0, math.Min(e.config.MaxGripForce, e.state.ObjectBreakForce))
+}
+
+// applyGripTarget is the low-level force actuator used only by residual mode.
+// The deterministic base supplies the nominal setpoint and SAC supplies the
+// bounded offset. Slewing towards that composed target preserves the fixed
+// hardware force-rate limit rather than teleporting the jaws to a new force.
+func (e *Environment) applyGripTarget(target float64, release bool) {
+	if release {
+		e.state.GripperOpening = 1
+		e.state.GripForce = 0
+		e.releaseCommanded = true
+		return
+	}
+	e.state.GripperOpening = 0
+	target = clamp(target, 0, e.maximumResidualGripForce())
+	maximumDelta := e.config.MaxGripForceRate * e.config.TimeStep
+	e.state.GripForce = slew(e.state.GripForce, target, maximumDelta)
 }
 
 func (e *Environment) updateGripState() {
@@ -1045,6 +1106,9 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 }
 
 func (e *Environment) rewardWithActions(previous State, action, previousAction [3]float64) RewardBreakdown {
+	if e.config.EffectiveControlMode() == ModeResidual {
+		return e.residualReward(previous, action)
+	}
 	breakdown := RewardBreakdown{Homeostasis: e.lastEnergyDelta}
 	// Time cost is always present. Homeostasis is an additional motivation
 	// signal, not a replacement that can make hovering cost-free.
@@ -1241,6 +1305,36 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		breakdown.Penalty += e.config.Reward.BoundaryCollisionPenalty
 	}
 	breakdown.Total = breakdown.Approach + breakdown.Contact + breakdown.Grip + breakdown.Descent + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
+	return breakdown
+}
+
+// residualReward intentionally scores only what SAC owns in residual mode:
+// corrective grip during measured slip, stable attachment, and avoiding
+// residual commands that amplify transport motion. The FSM owns macro
+// approach/lower/lift/transport; scoring those same milestones densely here
+// would reintroduce cross-phase reward interference.
+func (e *Environment) residualReward(previous State, residual [3]float64) RewardBreakdown {
+	breakdown := RewardBreakdown{Penalty: e.config.Reward.TimePenalty}
+	if e.state.Grip.Slipping {
+		// This is deliberately continuous. A higher chosen force reduces the
+		// observed severity and immediately improves value before detachment.
+		breakdown.Penalty -= e.config.Residual.SlipSeverityPenaltyScale * e.slipSeverity()
+	}
+	if !previous.Grip.ForceValid && e.state.Grip.ForceValid && e.state.Grip.ObjectAttached {
+		breakdown.Grip += e.config.Residual.SecureGraspBonus
+	}
+	if e.state.Grip.ForceValid && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping {
+		breakdown.Grip += e.config.Residual.HoldStabilityReward
+	}
+	if e.state.Phase == PhaseMoveToTarget && e.state.Grip.ObjectAttached {
+		// Charge only corrections that increase existing carriage motion. A
+		// correction opposing velocity is a legitimate damping action, not a
+		// source of synthetic positive reward.
+		amplifyingMotion := math.Max(0, e.state.CarriageVelocityX*residual[0])
+		breakdown.Stability = -e.config.Residual.DampingPenaltyScale * amplifyingMotion
+		breakdown.Penalty += breakdown.Stability
+	}
+	breakdown.Total = breakdown.Grip + breakdown.Penalty
 	return breakdown
 }
 

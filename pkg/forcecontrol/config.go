@@ -136,6 +136,10 @@ type RewardConfig struct {
 	HoverPenalty                  float64
 	ActionMagnitudePenaltyScale   float64
 	ActionDeltaPenaltyScale       float64
+	// ActionFlipPenalty applies only to a non-zero sign reversal of the vertical
+	// or force-rate action. It supplements the general action-delta cost and
+	// specifically discourages up/down and squeeze/release flutter.
+	ActionFlipPenalty float64
 	// ApproachProgressScale multiplies previousDX-currentDX, so every genuine
 	// approach transition is rewarded and every retreat is penalized.
 	ApproachProgressScale     float64
@@ -144,13 +148,19 @@ type RewardConfig struct {
 	// physical contact in the align-and-contact lesson. It is intentionally not
 	// the pick-and-place placement reward.
 	SuccessfulContactReward float64
-	ContactClosureReward    float64
-	SuccessfulGripReward    float64
-	LiftProgressScale       float64
-	DeliveryProgressScale   float64
-	SuccessfulPlacement     float64
-	UnsafeDropPenalty       float64
-	BreakPenalty            float64
+	// FirstContactBonus is paid exactly once per episode on the first physical
+	// contact. Re-contacting cannot pump this reward.
+	FirstContactBonus    float64
+	LossOfContactPenalty float64
+	// ContactClosureReward remains accepted for source/config compatibility.
+	// New code uses FirstContactBonus.
+	ContactClosureReward  float64
+	SuccessfulGripReward  float64
+	LiftProgressScale     float64
+	DeliveryProgressScale float64
+	SuccessfulPlacement   float64
+	UnsafeDropPenalty     float64
+	BreakPenalty          float64
 	// GraspBreakPenalty overrides BreakPenalty only for CurriculumGrasp. It is
 	// intentionally softer during early force exploration; later transport and
 	// placement lessons retain the full material-damage consequence.
@@ -415,11 +425,14 @@ func DefaultConfig() Config {
 			HoverPenalty:                  0.05,
 			ActionMagnitudePenaltyScale:   0.002,
 			ActionDeltaPenaltyScale:       0.01,
+			ActionFlipPenalty:             0.05,
 			// Match vertical descent shaping so every metre of genuine approach
 			// earns an immediate, signed transition reward.
 			ApproachProgressScale:       3.0,
 			AlignDistancePenaltyScale:   0.02,
 			SuccessfulContactReward:     5.0,
+			FirstContactBonus:           2.0,
+			LossOfContactPenalty:        2.5,
 			ContactClosureReward:        2.0,
 			SuccessfulGripReward:        15.0,
 			LiftProgressScale:           2.0,

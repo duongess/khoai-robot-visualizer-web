@@ -118,6 +118,7 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"required_grip_force":                   float32(t.environment.requiredForce()),
 		"invalid_contact_frames":                float32(t.environment.invalidContactFrames),
 		"contact_without_grip_frames":           float32(t.environment.contactWithoutGripFrames),
+		"contact_bonus_awarded":                 float32(boolToFloat(state.ContactBonusAwarded)),
 		"slip_frames":                           float32(t.environment.slipFrames),
 		"slip_severity":                         float32(t.environment.slipSeverity()),
 		"slipping":                              float32(boolToFloat(state.Grip.Slipping)),

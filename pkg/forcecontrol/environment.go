@@ -8,12 +8,12 @@ import (
 )
 
 // ObservationDimension is the fixed goal-conditioned policy input size.
-const ObservationDimension = 29
+const ObservationDimension = 30
 
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 23
+const CoordinateSystemVersion = 25
 
 const (
 	observationGripperX = iota
@@ -45,6 +45,7 @@ const (
 	observationLastActionVertical
 	observationLastActionGripper
 	observationAlignmentGateAwarded
+	observationContactBonusAwarded
 )
 
 // GripState distinguishes a command to close the gripper from physical object
@@ -149,8 +150,12 @@ type State struct {
 	PlacementStableSteps int
 	BoundaryHit          bool
 	Grip                 GripState
-	Phase                Phase
-	EpisodeStep          int
+	// ContactBonusAwarded is episode state. It prevents re-contact reward
+	// pumping and is included in the observation so reward semantics remain
+	// Markovian from the policy's perspective.
+	ContactBonusAwarded bool
+	Phase               Phase
+	EpisodeStep         int
 	// Energy is an authoritative, normalized homeostatic reserve in [0, 1].
 	Energy float64
 }
@@ -165,7 +170,6 @@ type Environment struct {
 	ready       bool
 
 	gripBonusAwarded               bool
-	contactClosureRewardAwarded    bool
 	gripFoodAwarded                bool
 	liftFoodAwarded                bool
 	deliveryFoodAwarded            bool
@@ -259,7 +263,7 @@ func (e *Environment) reset() State {
 		e.state.GripperY = clamp(e.state.GripperY+e.symmetricJitter(e.config.Curriculum.Randomization.ContactStartHeightJitter), minimumY, maximumY)
 	}
 	e.gripBonusAwarded = false
-	e.contactClosureRewardAwarded = false
+	e.state.ContactBonusAwarded = false
 	e.gripFoodAwarded = false
 	e.liftFoodAwarded = false
 	e.deliveryFoodAwarded = false
@@ -295,9 +299,9 @@ func (e *Environment) reset() State {
 	return e.state
 }
 
-// applyCurriculumReset keeps every lesson physically fresh. Nearby curriculum
-// resets never lower into contact, create an attachment, or choose an action
-// for the policy.
+// applyCurriculumReset keeps every lesson physically fresh. The reverse grasp
+// curriculum intentionally starts in contact, but never attaches the object or
+// selects grip force for the policy.
 func (e *Environment) applyCurriculumReset() {
 	e.state.Phase = PhaseApproachObject
 	switch e.currentCurriculumStage() {
@@ -355,23 +359,18 @@ func (e *Environment) placeNearObjectForAlignLesson() {
 	e.state.GripperVelocityY = 0
 }
 
-// placeNearObjectForGraspLesson starts from a short, policy-controlled
-// approach to the real grasp pose. Both the X and Y offsets are outside the
-// contact tolerances, so the actor must still produce the final approach and
-// descent rather than inheriting a pre-grasped object.
+// placeNearObjectForGraspLesson is a reverse-curriculum reset: geometry is
+// already a valid contact pose, so the actor's remaining task is to learn its
+// force-rate command. The object remains detached and the gripper open; no
+// attachment or force is fabricated on reset.
 func (e *Environment) placeNearObjectForGraspLesson() {
-	minimumDistance := math.Max(e.config.AlignmentEnterTolerance, e.config.GraspHorizontalTolerance) + 0.05
-	e.state.CarriageX = e.nearObjectCarriageX(e.config.Curriculum.GraspStartDistance, e.config.Curriculum.GraspStartDistanceJitter, minimumDistance)
+	e.state.CarriageX = e.state.ObjectX
 	e.state.CarriageVelocityX = 0
-	_, _, minimumY, maximumY := e.safeBounds()
-	graspY := e.objectGripHeight()
-	minimumHeightOffset := e.config.VerticalTolerance + 0.05
-	offset := math.Max(minimumHeightOffset, e.config.Curriculum.GraspStartHeightOffset+e.symmetricJitter(e.config.Curriculum.GraspStartHeightJitter))
-	e.state.GripperY = clamp(graspY+offset, minimumY, maximumY)
-	if math.Abs(e.state.GripperY-graspY) <= e.config.GraspVerticalTolerance {
-		e.state.GripperY = clamp(graspY+minimumHeightOffset, minimumY, maximumY)
-	}
+	e.state.GripperY = e.objectGripHeightFor(e.state)
 	e.state.GripperVelocityY = 0
+	e.state.Grip = GripState{ContactDetected: true}
+	e.state.ObjectGrasped = false
+	e.state.Phase = PhaseGripObject
 }
 
 func (e *Environment) nearObjectCarriageX(distance, jitter, minimumDistance float64) float64 {
@@ -1000,7 +999,16 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	breakdown.Penalty = e.config.Reward.TimePenalty
 	attached := e.state.Grip.ObjectAttached
 	stage := e.currentCurriculumStage()
-	if !attached {
+	if e.state.Grip.ContactDetected && !e.state.ContactBonusAwarded {
+		// This latch deliberately never resets until reset(). Re-touching an
+		// object after backing off must not become an episode reward pump.
+		breakdown.Contact += e.config.Reward.FirstContactBonus
+		e.state.ContactBonusAwarded = true
+	}
+	// Contact has already paid its one sparse bonus. Freeze geometric progress
+	// shaping from that point onward, otherwise a lower/retract/re-contact loop
+	// can earn more than committing to grip force.
+	if !attached && !e.state.ContactBonusAwarded {
 		currentDX := math.Abs(e.state.CarriageX - e.state.ObjectX)
 		previousDX := math.Abs(previous.CarriageX - previous.ObjectX)
 		currentDY := e.graspGuideErrorFor(e.state)
@@ -1036,11 +1044,17 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	}
 	breakdown.Smoothness = -e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(action) -
 		e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(action, previousAction)
+	for _, index := range [...]int{1, 2} { // vertical and force-rate actions
+		if action[index]*previousAction[index] < 0 {
+			breakdown.Smoothness -= e.config.Reward.ActionFlipPenalty * math.Abs(action[index]-previousAction[index])
+		}
+	}
 	breakdown.Penalty += breakdown.Smoothness
-	if !previous.Grip.ContactDetected && e.state.Grip.ContactDetected && e.state.Grip.GripperClosed && !attached && !e.state.Grip.Slipping && e.rewardPhaseID(e.state) == 3 {
-		// A contact reward is a visible state transition, not a historical
-		// "already rewarded" flag. Closing far above the object cannot qualify.
-		breakdown.Contact += e.config.Reward.ContactClosureReward
+	if e.state.ContactBonusAwarded && !e.wasEverGrasped && previous.Grip.ContactDetected && !e.state.Grip.ContactDetected && !attached {
+		// Penalize only the departure event. A continuing per-frame charge would
+		// turn this latch into an unrelated terminal cost rather than scoring the
+		// actual abandon-contact action.
+		breakdown.Penalty -= e.config.Reward.LossOfContactPenalty
 	}
 	if stage != CurriculumAlignAndContact && !previous.Grip.ObjectAttached && attached {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
@@ -1270,6 +1284,7 @@ func (e *Environment) observation() []float32 {
 		e.lastAppliedAction[1],
 		e.lastAppliedAction[2],
 		boolValue(e.alignmentGateAwarded),
+		boolValue(state.ContactBonusAwarded),
 	}
 	result := make([]float32, len(values))
 	for index, value := range values {

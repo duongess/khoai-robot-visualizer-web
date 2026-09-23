@@ -25,7 +25,7 @@ func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
 	if PhaseFromNormalized(observation[observationPhase]) != PhaseApproachObject {
 		t.Fatalf("observation phase = %v", observation[observationPhase])
 	}
-	if observation[observationAlignedX] != -1 || observation[observationInGraspZone] != -1 || observation[observationLastActionHorizontal] != 0 || observation[observationLastActionVertical] != 0 || observation[observationLastActionGripper] != 0 || observation[observationAlignmentGateAwarded] != -1 {
+	if observation[observationAlignedX] != -1 || observation[observationInGraspZone] != -1 || observation[observationLastActionHorizontal] != 0 || observation[observationLastActionVertical] != 0 || observation[observationLastActionGripper] != 0 || observation[observationAlignmentGateAwarded] != -1 || observation[observationContactBonusAwarded] != -1 {
 		t.Fatalf("reset observation is missing phase gates or previous action: %v", observation)
 	}
 	for index, value := range observation {
@@ -832,7 +832,7 @@ func TestAlignLessonStartsNearButDetachedAndAwardsOnlyContact(t *testing.T) {
 	}
 }
 
-func TestGraspLessonStartsNearThePoseButDetached(t *testing.T) {
+func TestGraspLessonStartsInContactButDetached(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumGrasp
 	config.Curriculum.Randomization.Enabled = false
@@ -841,34 +841,69 @@ func TestGraspLessonStartsNearThePoseButDetached(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := task.environment.state
-	horizontalDistance := math.Abs(state.CarriageX - state.ObjectX)
-	minimumDistance := math.Max(config.AlignmentEnterTolerance, config.GraspHorizontalTolerance) + 0.05
-	if horizontalDistance < minimumDistance || horizontalDistance > config.Curriculum.GraspStartDistance+config.Curriculum.GraspStartDistanceJitter+1e-9 {
-		t.Fatalf("grasp reset horizontal distance=%v, want nearby but detached", horizontalDistance)
+	if state.CarriageX != state.ObjectX {
+		t.Fatalf("grasp reset carriage X=%v, want object X=%v", state.CarriageX, state.ObjectX)
 	}
-	verticalDistance := math.Abs(state.GripperY - task.environment.objectGripHeight())
-	if verticalDistance <= config.GraspVerticalTolerance {
-		t.Fatalf("grasp reset fabricated vertical contact: state=%#v grasp_y=%v", state, task.environment.objectGripHeight())
+	if state.GripperY != task.environment.objectGripHeightFor(state) || !task.environment.contactDetected() {
+		t.Fatalf("grasp reset is not at the physical contact pose: state=%#v grasp_y=%v", state, task.environment.objectGripHeightFor(state))
 	}
-	if state.Grip.ContactDetected || state.Grip.ObjectAttached || state.Grip.GripperClosed {
-		t.Fatalf("grasp reset fabricated grip state: %#v", state.Grip)
+	if !state.Grip.ContactDetected || state.Grip.ObjectAttached || state.Grip.GripperClosed || state.GripForce != 0 || state.Phase != PhaseGripObject {
+		t.Fatalf("grasp reset must expose contact without fabricating a grip: %#v", state)
 	}
 }
 
-func TestContactTransitionRewardIsMarkovian(t *testing.T) {
+func TestContactBonusIsOneTimeAndContactLossCannotPumpRewards(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	config.Curriculum.Stage = CurriculumGrasp
 	environment := newEnvironment(18, config)
-	previous := State{Phase: PhaseGripObject}
+	previous := State{Phase: PhaseGripObject, ObjectMass: config.ObjectMass, ObjectFriction: config.ObjectFriction}
 	environment.state = State{
-		Phase: PhaseGripObject,
-		Grip:  GripState{GripperClosed: true, ContactDetected: true},
+		Phase:          PhaseGripObject,
+		ObjectMass:     config.ObjectMass,
+		ObjectFriction: config.ObjectFriction,
+		Grip:           GripState{GripperClosed: true, ContactDetected: true},
 	}
 	first := environment.reward(previous, 0, 0, 0)
-	second := environment.reward(previous, 0, 0, 0)
-	if first.Contact != config.Reward.ContactClosureReward || second.Contact != config.Reward.ContactClosureReward {
-		t.Fatalf("the same contact transition must have the same Markov reward: first=%#v second=%#v", first, second)
+	if first.Contact != config.Reward.FirstContactBonus || !environment.state.ContactBonusAwarded || first.Approach != 0 || first.Descent != 0 {
+		t.Fatalf("first contact was not latched and isolated from geometric shaping: %#v", first)
+	}
+	observation := environment.observation()
+	if observation[observationContactBonusAwarded] != 1 {
+		t.Fatalf("contact latch is missing from policy observation: %v", observation)
+	}
+
+	previous = environment.state
+	environment.state.Grip = GripState{}
+	lost := environment.reward(previous, 0, 0, 0)
+	if lost.Contact != 0 || lost.Penalty > config.Reward.TimePenalty-config.Reward.LossOfContactPenalty {
+		t.Fatalf("abandoning first contact was not penalized: %#v", lost)
+	}
+
+	previous = environment.state
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true}
+	regained := environment.reward(previous, 0, 0, 0)
+	if regained.Contact != 0 || regained.Approach != 0 || regained.Descent != 0 {
+		t.Fatalf("re-contact pumped a reward after latch: %#v", regained)
+	}
+}
+
+func TestVerticalAndGripActionSignFlipsReceiveFlutterPenalty(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Reward.TimePenalty = 0
+	config.Reward.ActionMagnitudePenaltyScale = 0
+	config.Reward.ActionDeltaPenaltyScale = 0
+	config.Reward.ActionFlipPenalty = 0.5
+	environment := newEnvironment(19, config)
+	previous := State{ObjectMass: config.ObjectMass, ObjectFriction: config.ObjectFriction}
+	environment.state = previous
+	action := [3]float64{0.7, -0.8, -0.6}
+	lastAction := [3]float64{-0.7, 0.7, 0.5}
+	reward := environment.rewardWithActions(previous, action, lastAction)
+	want := -config.Reward.ActionFlipPenalty * (math.Abs(action[1]-lastAction[1]) + math.Abs(action[2]-lastAction[2]))
+	if math.Abs(reward.Smoothness-want) > 1e-9 {
+		t.Fatalf("flutter penalty = %v, want %v", reward.Smoothness, want)
 	}
 }
 

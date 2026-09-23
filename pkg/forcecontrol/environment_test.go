@@ -211,6 +211,33 @@ func TestForceProgressAndUnderGripPenaltyApplyDuringFullTask(t *testing.T) {
 	}
 }
 
+func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	config.Reward.TimePenalty = 0
+	config.Reward.AttachedHoldRewardPerSecond = 0
+	environment := newEnvironment(46, config)
+	environment.reset()
+	environment.state.Phase = PhaseLiftObject
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	environment.state.ContactBonusAwarded = true
+	environment.state.GripForce = environment.requiredForce()
+	environment.state.ObjectY = environment.requiredCarryHeight() - 0.20
+	previous := environment.state
+
+	stalled := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if got, want := stalled.LiftStall, -config.Reward.LiftStallPenalty; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("stalled lift penalty = %v, want %v", got, want)
+	}
+
+	environment.state.ObjectY = previous.ObjectY + 0.05
+	climbing := environment.rewardWithActions(previous, [3]float64{0, 1, 0}, [3]float64{})
+	if climbing.LiftStall != 0 || climbing.Lift <= 0 || climbing.Total <= stalled.Total {
+		t.Fatalf("object height gain did not remove lift stall penalty: stalled=%#v climbing=%#v", stalled, climbing)
+	}
+}
+
 func TestGraspContactWithoutForceTimesOutButAlignDoesNot(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false

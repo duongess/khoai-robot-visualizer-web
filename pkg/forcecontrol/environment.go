@@ -13,7 +13,7 @@ const ObservationDimension = 30
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 25
+const CoordinateSystemVersion = 31
 
 const (
 	observationGripperX = iota
@@ -70,9 +70,12 @@ type RewardBreakdown struct {
 	Homeostasis   float64
 	DetachedForce float64
 	BreakRisk     float64
+	UnderGrip     float64
+	LiftStall     float64
 	Descent       float64
 	Hover         float64
 	Smoothness    float64
+	Retraction    float64
 	Penalty       float64
 	Total         float64
 }
@@ -169,12 +172,16 @@ type Environment struct {
 	state       State
 	ready       bool
 
-	gripBonusAwarded               bool
-	gripFoodAwarded                bool
-	liftFoodAwarded                bool
-	deliveryFoodAwarded            bool
-	successFoodAwarded             bool
-	wasEverGrasped                 bool
+	gripBonusAwarded    bool
+	gripFoodAwarded     bool
+	liftFoodAwarded     bool
+	deliveryFoodAwarded bool
+	successFoodAwarded  bool
+	wasEverGrasped      bool
+	// objectWasLifted latches a verified carry-height event for this episode.
+	// It is deliberately distinct from a momentary attachment: after it becomes
+	// true, losing the object outside the target is a terminal mid-air drop.
+	objectWasLifted                bool
 	invalidGripPenaltyAwarded      bool
 	insufficientGripPenaltyAwarded bool
 	emptyTargetPenaltyAwarded      bool
@@ -188,6 +195,7 @@ type Environment struct {
 	filterDeadZoneRemoved          [3]bool
 	filteredAction                 [3]float64
 	verticalAcceleration           float64
+	verticalRetractionBlocked      bool
 	invalidContactFrames           int
 	slipFrames                     int
 	releaseCommanded               bool
@@ -198,6 +206,7 @@ type Environment struct {
 	lastEnergyEvent                energyEvent
 	contactStableFrames            int
 	secureGripHoldFrames           int
+	liftHoldFrames                 int
 	contactWithoutGripFrames       int
 	contactSuccessStreak           int
 	activeCurriculumStage          CurriculumStage
@@ -269,6 +278,7 @@ func (e *Environment) reset() State {
 	e.deliveryFoodAwarded = false
 	e.successFoodAwarded = false
 	e.wasEverGrasped = false
+	e.objectWasLifted = false
 	e.invalidGripPenaltyAwarded = false
 	e.insufficientGripPenaltyAwarded = false
 	e.emptyTargetPenaltyAwarded = false
@@ -282,6 +292,7 @@ func (e *Environment) reset() State {
 	e.filterDeadZoneRemoved = [3]bool{}
 	e.filteredAction = [3]float64{}
 	e.verticalAcceleration = 0
+	e.verticalRetractionBlocked = false
 	e.invalidContactFrames = 0
 	e.slipFrames = 0
 	e.releaseCommanded = false
@@ -292,6 +303,7 @@ func (e *Environment) reset() State {
 	e.lastEnergyEvent = energyEventNone
 	e.contactStableFrames = 0
 	e.secureGripHoldFrames = 0
+	e.liftHoldFrames = 0
 	e.contactWithoutGripFrames = 0
 	e.applyCurriculumReset()
 	e.resetCount++
@@ -420,9 +432,14 @@ func (e *Environment) sampleEpisodeParameters() (objectX, targetX, mass, frictio
 		mass = math.Max(0.01, mass+e.symmetricJitter(randomization.ObjectMassJitter))
 		friction = clamp(friction+e.symmetricJitter(randomization.ObjectFrictionJitter), 0.05, 2)
 	}
-	if stage == CurriculumAlignAndContact {
-		targetX = e.separateTargetFromObject(objectX, targetX)
-	}
+	// An object that starts inside its target has already satisfied the
+	// transport geometry before an action is taken.  That is particularly
+	// harmful in full pick-and-place training: depending on the random seed,
+	// SAC can learn that the target vector is irrelevant and collapse to a rail
+	// boundary.  Keep the two task landmarks distinct for *every* curriculum
+	// stage, including a manually centred first reset.  This is reset
+	// distribution hygiene, not a controller hint.
+	targetX = e.separateTargetFromObject(objectX, targetX)
 	return
 }
 
@@ -539,6 +556,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	previousAction := e.lastAppliedAction
 	e.contactBeforeMotion = e.contactDetected()
 	e.state.BoundaryHit = false
+	e.verticalRetractionBlocked = false
 	e.applyHorizontalControl(filteredValues[0])
 	e.applyVerticalControl(filteredValues[1])
 	// Only upward motion requires extra carrying force. A lower-bound collision
@@ -559,6 +577,9 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	}
 	e.updateObjectPhysics()
 	e.resolveTerrainCollision()
+	if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
+		e.objectWasLifted = true
+	}
 	e.updatePlacementStability()
 	e.state.EpisodeStep++
 	if err := e.ValidateState(); err != nil {
@@ -588,6 +609,9 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 			case CurriculumAlignAndContact:
 				e.lastReward.Contact = e.config.Reward.SuccessfulContactReward
 				e.lastReward.Total += e.lastReward.Contact
+			case CurriculumLift:
+				e.lastReward.Success = e.config.Reward.SuccessfulLiftReward
+				e.lastReward.Total += e.lastReward.Success
 			case CurriculumTransportAndRelease, CurriculumFullPickAndPlace:
 				e.lastReward.Success = e.config.Reward.SuccessfulPlacement
 				e.lastReward.Total += e.lastReward.Success
@@ -701,6 +725,17 @@ func (e *Environment) applyHorizontalControl(value float64) {
 }
 
 func (e *Environment) applyVerticalControl(value float64) {
+	// In the aligned LowerToObject phase, retracting is never a task-valid
+	// command: contact is below the current gripper guide. Reject it in the
+	// backend (not only the renderer) and slew any existing upward velocity to
+	// zero. The actor still receives an explicit retraction/jerk penalty below.
+	if !e.state.Grip.ObjectAttached && e.state.Phase == PhaseLowerToObject &&
+		!e.state.Grip.ContactDetected &&
+		math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.Reward.AlignmentEpsilonX &&
+		e.state.GripperY > e.objectGripHeight()+e.config.Reward.GraspZoneToleranceY && value > 0 {
+		value = 0
+		e.verticalRetractionBlocked = true
+	}
 	// Once the end-effector is in the grasp slice, hold the vertical pose while
 	// the actor changes force. This removes the common hover/lower oscillation:
 	// tiny alternating Y actions cannot repeatedly leave and re-enter contact.
@@ -865,6 +900,11 @@ func (e *Environment) detectFailure(previous State) string {
 		return "object_break"
 	case e.objectOutOfBounds():
 		return "workspace_violation"
+	case e.objectWasLifted && !e.state.Grip.ObjectAttached && !e.objectInsideTarget():
+		// A verified lift turns any later detach outside the target into a
+		// material drop failure, even if the actor first tried to hide it by
+		// changing phase or opening the gripper.
+		return "mid_air_drop"
 	case previous.Grip.ObjectAttached && !e.state.Grip.ObjectAttached && previous.Phase != PhaseReleaseObject:
 		return "unsafe_drop"
 	case previous.Phase == PhaseReleaseObject && !e.state.Grip.ObjectAttached && !e.objectInsideTarget():
@@ -908,8 +948,20 @@ func (e *Environment) updatePhase(previous State) {
 		}
 		return
 	}
-	if stage == CurriculumLift && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
-		e.state.Phase = PhaseSuccess
+	if stage == CurriculumLift {
+		// A single frame above carry height is not a lift skill: it can be
+		// immediately followed by a release. Require a continuous, secure hold
+		// at height before issuing the terminal reward.
+		if e.state.Grip.ObjectAttached && !e.state.Grip.Slipping && e.state.ObjectY >= e.requiredCarryHeight() {
+			e.liftHoldFrames++
+			e.state.Phase = PhaseLiftObject
+			if e.liftHoldFrames >= e.config.Curriculum.LiftHoldFrames {
+				e.state.Phase = PhaseSuccess
+			}
+		} else {
+			e.liftHoldFrames = 0
+			e.updateStandardPhase(previous)
+		}
 		return
 	}
 	if stage == CurriculumAlignAndContact {
@@ -1044,20 +1096,49 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	}
 	breakdown.Smoothness = -e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(action) -
 		e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(action, previousAction)
+	jerkY := action[1] - previousAction[1]
+	breakdown.Smoothness -= e.config.Reward.JerkYPenaltyScale * jerkY * jerkY
 	for _, index := range [...]int{1, 2} { // vertical and force-rate actions
 		if action[index]*previousAction[index] < 0 {
 			breakdown.Smoothness -= e.config.Reward.ActionFlipPenalty * math.Abs(action[index]-previousAction[index])
 		}
 	}
 	breakdown.Penalty += breakdown.Smoothness
+	alignedX := math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.Reward.AlignmentEpsilonX
+	aboveGraspPose := e.state.GripperY > e.objectGripHeight()+e.config.Reward.GraspZoneToleranceY
+	if previous.Phase == PhaseLowerToObject && alignedX && !e.state.Grip.ContactDetected && aboveGraspPose {
+		// Lowering is the only phase in which moving upward is task-regressive.
+		// Use both commanded action and measured velocity so inertia after an
+		// action reversal cannot evade the penalty.
+		isMovingUpwards := action[1] > e.config.ActionDeadZone || e.state.GripperVelocityY > e.config.Reward.HoverVelocityThreshold
+		if isMovingUpwards {
+			breakdown.Retraction = -e.config.Reward.UpwardRetractionPenalty
+		}
+		// Potential shaping already gives a negative descent reward for moving
+		// away. Add a larger measured-distance term so a down/up/down sequence
+		// has strictly negative return even if inertia obscures action sign.
+		retractionDistance := math.Max(0, e.graspGuideErrorFor(e.state)-e.graspGuideErrorFor(previous))
+		breakdown.Retraction -= e.config.Reward.RetractionDistancePenaltyScale * retractionDistance
+		breakdown.Penalty += breakdown.Retraction
+		// A second time cost makes an aligned lower trajectory prefer the shortest
+		// route to the grasp pose over lingering for tiny depth rewards.
+		breakdown.Penalty -= e.config.Reward.LoweringStepPenalty
+	}
 	if e.state.ContactBonusAwarded && !e.wasEverGrasped && previous.Grip.ContactDetected && !e.state.Grip.ContactDetected && !attached {
 		// Penalize only the departure event. A continuing per-frame charge would
 		// turn this latch into an unrelated terminal cost rather than scoring the
 		// actual abandon-contact action.
 		breakdown.Penalty -= e.config.Reward.LossOfContactPenalty
 	}
-	if stage != CurriculumAlignAndContact && !previous.Grip.ObjectAttached && attached {
+	if stage != CurriculumAlignAndContact && !previous.Grip.ObjectAttached && attached && !e.gripBonusAwarded {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
+		e.gripBonusAwarded = true
+	}
+	if previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
+		// This intentionally remains smaller than TimePenalty. It makes keeping
+		// a real grasp denser and safer than release, but cannot become a
+		// stationary-hold reward pump during lift or transport.
+		breakdown.Grip += e.config.Reward.AttachedHoldRewardPerSecond * e.config.TimeStep
 	}
 	if stage == CurriculumGrasp && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
 		// Only the isolated grasp lesson rewards elapsed holding time. In the full
@@ -1068,13 +1149,25 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	if previous.Phase == PhaseLiftObject && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
 		breakdown.Lift = e.config.Reward.LiftProgressScale * (e.state.ObjectY - previous.ObjectY)
 	}
-	// Delivery reward is intentionally impossible without a secure attachment.
-	// It is measured from object-to-target distance, never gripper-to-target.
-	if previous.Phase == PhaseMoveToTarget && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
-		previousDistance := targetDistance(previous)
-		currentDistance := targetDistance(e.state)
+	if stage != CurriculumGrasp && previous.Phase == PhaseLiftObject && !e.objectWasLifted &&
+		e.state.ObjectY < e.requiredCarryHeight() &&
+		(!attached || e.state.Grip.Slipping || e.state.ObjectY <= previous.ObjectY) {
+		// A lift phase with no upward object progress is not neutral. This is
+		// deliberately independent of force-control semantics: the policy still
+		// chooses force, but weak/no-force actions now receive an immediate cost
+		// instead of waiting for a later drop or timeout.
+		breakdown.LiftStall = -e.config.Reward.LiftStallPenalty
+		breakdown.Penalty += breakdown.LiftStall
+	}
+	// Delivery reward is intentionally impossible without a secure attachment
+	// and a verified lift. It uses the horizontal *object* distance to target,
+	// not gripper motion; previous is s_t, so this is a Markov transition reward
+	// rather than a mutable record that can be pumped by oscillation.
+	if e.objectWasLifted && previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping {
+		previousDistance := math.Abs(previous.ObjectX - previous.TargetX)
+		currentDistance := math.Abs(e.state.ObjectX - e.state.TargetX)
 		deliveryDelta := previousDistance - currentDistance
-		breakdown.Delivery = e.config.Reward.DeliveryProgressScale * deliveryDelta
+		breakdown.Delivery = e.config.Reward.TransportProgressScale * deliveryDelta
 	}
 	if previous.Grip.ObjectAttached && attached && previous.Phase != PhaseReleaseObject {
 		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(action[2]-previousAction[2])
@@ -1116,12 +1209,20 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		breakdown.DetachedForce = e.config.Reward.DetachedExcessForcePenalty * ratio * ratio
 		breakdown.Penalty += breakdown.DetachedForce
 	}
-	if stage == CurriculumGrasp && e.state.Grip.ContactDetected && e.state.GripForce < e.requiredForce() {
+	if stage != CurriculumAlignAndContact && e.state.Grip.ContactDetected && e.state.GripForce < e.requiredForce() {
 		// Give the actor signed, step-local feedback while it ramps from zero to
 		// the attachment threshold. A force decrease receives the same magnitude
 		// in the negative direction, so cycling force cannot farm this reward.
+		// This must operate beyond the isolated grasp lesson: a force deficit
+		// during lift/transport is still physically unsafe and otherwise leaves
+		// SAC with only a delayed slip/detach signal.
 		deltaForce := e.state.GripForce - previous.GripForce
 		breakdown.Grip += e.config.Reward.ForceProgressScale * deltaForce
+	}
+	if stage != CurriculumAlignAndContact && (e.state.Grip.ContactDetected || attached) && e.state.GripForce < e.requiredForce() {
+		deficit := clamp((e.requiredForce()-e.state.GripForce)/math.Max(e.requiredForce(), 1e-9), 0, 1)
+		breakdown.UnderGrip = -e.config.Reward.UnderGripPenaltyScale * deficit
+		breakdown.Penalty += breakdown.UnderGrip
 	}
 	if previous.Phase == PhaseGripObject && e.state.Grip.ContactDetected && !attached {
 		// The small per-step cost prevents a contact with insufficient force from
@@ -1156,11 +1257,12 @@ func (e *Environment) updateHomeostasis(failureReason string) {
 	delta := -e.config.Homeostasis.EnergyDecayPerStep
 	e.lastEnergyDecay = -e.config.Homeostasis.EnergyDecayPerStep
 	attached := e.state.Grip.ObjectAttached && !e.state.Grip.Slipping
+	stage := e.currentCurriculumStage()
 	switch {
 	case failureReason == "object_break":
 		delta -= e.config.Homeostasis.BreakEnergyLoss
 		e.lastEnergyEvent = energyEventBreak
-	case failureReason == "unsafe_drop" || failureReason == "release_outside_target" || failureReason == "workspace_violation":
+	case failureReason == "unsafe_drop" || failureReason == "mid_air_drop" || failureReason == "release_outside_target" || failureReason == "workspace_violation":
 		delta -= e.config.Homeostasis.UnsafeDropEnergyLoss
 		e.lastEnergyEvent = energyEventUnsafeDrop
 	case e.state.Phase == PhaseSuccess && !e.successFoodAwarded:
@@ -1173,7 +1275,8 @@ func (e *Environment) updateHomeostasis(failureReason string) {
 		e.lastEnergyFoodGain = e.config.Homeostasis.DeliveryEnergyGain
 		e.deliveryFoodAwarded = true
 		e.lastEnergyEvent = energyEventDelivery
-	case attached && e.state.ObjectY >= e.requiredCarryHeight() && !e.liftFoodAwarded:
+	case attached && e.state.ObjectY >= e.requiredCarryHeight() &&
+		(stage != CurriculumLift || e.liftHoldFrames >= e.config.Curriculum.LiftHoldFrames) && !e.liftFoodAwarded:
 		delta += e.config.Homeostasis.LiftEnergyGain
 		e.lastEnergyFoodGain = e.config.Homeostasis.LiftEnergyGain
 		e.liftFoodAwarded = true
@@ -1204,6 +1307,8 @@ func (e *Environment) failurePenalty(reason string) float64 {
 		return e.config.Reward.IdleContactTimeoutPenalty
 	case "workspace_violation":
 		return e.config.Reward.WorkspacePenalty
+	case "mid_air_drop":
+		return e.config.Reward.MidAirDropPenalty
 	case "unsafe_drop", "release_outside_target":
 		return e.config.Reward.DroppedObjectPenalty
 	default:
@@ -1229,6 +1334,8 @@ func (e *Environment) failureReasonCode() int {
 		return 6
 	case "idle_contact_timeout":
 		return 7
+	case "mid_air_drop":
+		return 8
 	default:
 		return 0
 	}

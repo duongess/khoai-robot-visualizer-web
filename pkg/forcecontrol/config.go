@@ -90,6 +90,10 @@ type CurriculumConfig struct {
 	// configured fixed TimeStep, so changing simulation speed does not silently
 	// make the lesson easier or harder.
 	GraspHoldSeconds float64
+	// LiftHoldFrames is the number of consecutive fixed-physics frames for
+	// which a securely attached object must remain above carry height before
+	// the lift lesson can succeed. It prevents a one-frame lift/release exploit.
+	LiftHoldFrames int
 	// AlignStartDistance is the maximum initial carriage-to-object offset for
 	// lesson 1. The reset chooses a side with equal probability and then samples
 	// a detached offset up to this limit.
@@ -140,6 +144,9 @@ type RewardConfig struct {
 	// or force-rate action. It supplements the general action-delta cost and
 	// specifically discourages up/down and squeeze/release flutter.
 	ActionFlipPenalty float64
+	// JerkYPenaltyScale is a quadratic cost on changes to the vertical action.
+	// It makes rapid lower/retract ratcheting expensive even before a sign flip.
+	JerkYPenaltyScale float64
 	// ApproachProgressScale multiplies previousDX-currentDX, so every genuine
 	// approach transition is rewarded and every retreat is penalized.
 	ApproachProgressScale     float64
@@ -158,9 +165,13 @@ type RewardConfig struct {
 	SuccessfulGripReward  float64
 	LiftProgressScale     float64
 	DeliveryProgressScale float64
-	SuccessfulPlacement   float64
-	UnsafeDropPenalty     float64
-	BreakPenalty          float64
+	// TransportProgressScale rewards signed horizontal object-to-target
+	// progress only after the object has genuinely been lifted.
+	TransportProgressScale float64
+	SuccessfulLiftReward   float64
+	SuccessfulPlacement    float64
+	UnsafeDropPenalty      float64
+	BreakPenalty           float64
 	// GraspBreakPenalty overrides BreakPenalty only for CurriculumGrasp. It is
 	// intentionally softer during early force exploration; later transport and
 	// placement lessons retain the full material-damage consequence.
@@ -172,6 +183,14 @@ type RewardConfig struct {
 	// required force. It gives the actor a dense gradient while it ramps force
 	// instead of making attachment the first non-zero signal.
 	ForceProgressScale float64
+	// UnderGripPenaltyScale penalizes the normalized shortfall below required
+	// force whenever the jaws have real contact (or are still attached). It
+	// creates a dense incentive to continue squeezing before slip/detach.
+	UnderGripPenaltyScale float64
+	// LiftStallPenalty applies while a previously secured object is below carry
+	// height but fails to gain vertical height. It makes a weak grip that cannot
+	// lift immediately worse than increasing the policy's force-rate command.
+	LiftStallPenalty float64
 	// ContactWithoutGripForceThreshold and ContactWithoutGripTimeoutFrames
 	// define the grasp-only failure for resting in physical contact without
 	// attempting a force ramp. IdleContactTimeoutPenalty is terminal.
@@ -199,17 +218,32 @@ type RewardConfig struct {
 	InactivityPenalty                  float64
 	EmptyTargetPenalty                 float64
 	DroppedObjectPenalty               float64
-	BoundaryCollisionPenalty           float64
-	LowerProgressScale                 float64
-	AlignedPositionReward              float64
-	StableAlignmentReward              float64
-	AlignmentVelocityPenalty           float64
-	ActionNearTargetPenalty            float64
+	// MidAirDropPenalty is used after a verified lift when attachment is lost
+	// outside the target zone. It is deliberately separate from an ordinary
+	// failed release because the object is no longer safely supported.
+	MidAirDropPenalty        float64
+	BoundaryCollisionPenalty float64
+	LowerProgressScale       float64
+	AlignedPositionReward    float64
+	StableAlignmentReward    float64
+	AlignmentVelocityPenalty float64
+	ActionNearTargetPenalty  float64
 	// LowerStallPenalty applies only while the carriage is horizontally
 	// aligned in the lowering phase but fails to reduce its vertical grasp
 	// error. It prevents X-axis dithering from being a cheap alternative to
 	// attempting the learned descent.
 	LowerStallPenalty float64
+	// UpwardRetractionPenalty applies when the policy moves upward while
+	// horizontally aligned, detached, and still above the grasp pose.
+	UpwardRetractionPenalty float64
+	// RetractionDistancePenaltyScale makes every measured increase in grasp
+	// height error costlier than an equal descent gain. It closes the
+	// down/up/down ratcheting reward exploit even while residual velocity is
+	// braking after an upward command has been rejected.
+	RetractionDistancePenaltyScale float64
+	// LoweringStepPenalty is an additional positive cost subtracted per step
+	// during a detached, aligned LowerToObject phase.
+	LoweringStepPenalty float64
 	// ApproachStallPenalty applies while the object remains horizontally out of
 	// reach and the policy fails to reduce that X error. Descending at the wrong
 	// X coordinate therefore cannot replace a real approach.
@@ -218,6 +252,11 @@ type RewardConfig struct {
 	// secure physical attachment during the grasp lesson. It is time-scaled in
 	// the environment so it remains stable if TimeStep changes.
 	GraspHoldRewardPerSecond float64
+	// AttachedHoldRewardPerSecond applies to every non-slipping attachment in
+	// every lesson. It is deliberately below the per-second time cost, so it
+	// makes holding preferable to dropping without making stationary holding a
+	// profitable way to consume a whole full-task episode.
+	AttachedHoldRewardPerSecond float64
 }
 
 // WorkspaceBounds is the authoritative physical coordinate system. World Y is
@@ -380,7 +419,8 @@ func DefaultConfig() Config {
 			ContactSuccessesRequired: 10,
 			// A short secure hold verifies a real attachment before lift, without
 			// making the early curriculum excessively sparse.
-			GraspHoldSeconds: 2,
+			GraspHoldSeconds: 10,
+			LiftHoldFrames:   15,
 			// Start with a narrow, symmetric +/-1m approach distribution. This
 			// maximum can be increased in a later curriculum experiment without
 			// ever spawning contact or attachment.
@@ -425,18 +465,23 @@ func DefaultConfig() Config {
 			HoverPenalty:                  0.05,
 			ActionMagnitudePenaltyScale:   0.002,
 			ActionDeltaPenaltyScale:       0.01,
-			ActionFlipPenalty:             0.05,
+			ActionFlipPenalty:             0.15,
+			JerkYPenaltyScale:             0.15,
 			// Match vertical descent shaping so every metre of genuine approach
 			// earns an immediate, signed transition reward.
-			ApproachProgressScale:       3.0,
-			AlignDistancePenaltyScale:   0.02,
-			SuccessfulContactReward:     5.0,
-			FirstContactBonus:           2.0,
-			LossOfContactPenalty:        2.5,
-			ContactClosureReward:        2.0,
-			SuccessfulGripReward:        15.0,
+			ApproachProgressScale:     3.0,
+			AlignDistancePenaltyScale: 0.02,
+			SuccessfulContactReward:   5.0,
+			FirstContactBonus:         2.0,
+			LossOfContactPenalty:      2.5,
+			ContactClosureReward:      2.0,
+			// The attachment event is helpful exploration feedback, but it must
+			// never outweigh the consequence of immediately dropping the object.
+			SuccessfulGripReward:        8.0,
 			LiftProgressScale:           2.0,
 			DeliveryProgressScale:       3.0,
+			TransportProgressScale:      3.0,
+			SuccessfulLiftReward:        20.0,
 			SuccessfulPlacement:         50.0,
 			UnsafeDropPenalty:           -10.0,
 			BreakPenalty:                -20.0,
@@ -448,6 +493,8 @@ func DefaultConfig() Config {
 			// from 0 to about 11.2N therefore returns approximately +5.4 reward
 			// before attachment, giving SAC a dense, low-risk exploration signal.
 			ForceProgressScale:                 0.5,
+			UnderGripPenaltyScale:              1.00,
+			LiftStallPenalty:                   0.30,
 			ContactWithoutGripForceThreshold:   2.0,
 			ContactWithoutGripTimeoutFrames:    20,
 			IdleContactTimeoutPenalty:          -6.0,
@@ -466,7 +513,8 @@ func DefaultConfig() Config {
 			DetachedExcessForcePenalty: -0.50,
 			InactivityPenalty:          -0.005,
 			EmptyTargetPenalty:         -2.0,
-			DroppedObjectPenalty:       -10.0,
+			DroppedObjectPenalty:       -20.0,
+			MidAirDropPenalty:          -25.0,
 			BoundaryCollisionPenalty:   -0.25,
 			// Descending toward the physical grasp guide needs a denser signal
 			// than a distant terminal placement reward. This is still signed
@@ -478,13 +526,20 @@ func DefaultConfig() Config {
 			ActionNearTargetPenalty:  0.02,
 			// Once aligned over the object, lateral motion without vertical
 			// progress must not be safer than attempting a grasp.
-			LowerStallPenalty: -0.02,
+			LowerStallPenalty:              -0.02,
+			UpwardRetractionPenalty:        1.00,
+			RetractionDistancePenaltyScale: 6.00,
+			LoweringStepPenalty:            0.04,
 			// While still horizontally out of reach, lowering alone is not useful
 			// progress and must not be a cheap way to wait out an episode.
 			ApproachStallPenalty: -0.02,
 			// The grasp lesson's secure hold earns dense feedback after a valid
 			// attachment; transport relies on object-to-target progress instead.
 			GraspHoldRewardPerSecond: 0.50,
+			// +0.005/0.1s step is smaller than the -0.01 base time cost. It
+			// supplies a dense force-maintenance signal in lift/transport without
+			// paying the agent to wait motionless forever.
+			AttachedHoldRewardPerSecond: 0.05,
 		},
 		Terrain: []TerrainPoint{{X: 0, Y: 0.3}, {X: 1.5, Y: 0.3}, {X: 3, Y: 0.5}, {X: 4.5, Y: 0.25}, {X: 6, Y: 0.25}},
 	}

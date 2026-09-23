@@ -181,6 +181,36 @@ func TestGraspForceRampReceivesSignedDenseProgressReward(t *testing.T) {
 	}
 }
 
+func TestForceProgressAndUnderGripPenaltyApplyDuringFullTask(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	previous := State{
+		Phase:               PhaseGripObject,
+		GripForce:           8,
+		ObjectMass:          config.InitialObjectMass,
+		ObjectFriction:      config.ObjectFriction,
+		ObjectBreakForce:    config.ObjectBreakForce,
+		Grip:                GripState{GripperClosed: true, ContactDetected: true},
+		ContactBonusAwarded: true,
+	}
+	increase := newEnvironment(44, config)
+	increase.state = previous
+	increase.state.GripForce = 9.2
+	towardRequired := increase.rewardWithActions(previous, [3]float64{0, 0, 1}, [3]float64{})
+	if want := config.Reward.ForceProgressScale * 1.2; math.Abs(towardRequired.Grip-want) > 1e-9 || towardRequired.UnderGrip >= 0 {
+		t.Fatalf("full-task force ramp did not receive dense progress/deficit feedback: %#v", towardRequired)
+	}
+
+	decrease := newEnvironment(45, config)
+	decrease.state = previous
+	decrease.state.GripForce = 6.8
+	awayFromRequired := decrease.rewardWithActions(previous, [3]float64{0, 0, -1}, [3]float64{})
+	if awayFromRequired.Grip >= 0 || awayFromRequired.UnderGrip >= towardRequired.UnderGrip || awayFromRequired.Total >= towardRequired.Total {
+		t.Fatalf("under-force backoff was not worse than squeezing: increase=%#v decrease=%#v", towardRequired, awayFromRequired)
+	}
+}
+
 func TestGraspContactWithoutForceTimesOutButAlignDoesNot(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
@@ -275,6 +305,38 @@ func TestAlignResetUniformlySpawnsObjectAndBalancesCarriageSides(t *testing.T) {
 	}
 	if difference := math.Abs(float64(left-right)) / 500; difference > 0.12 {
 		t.Fatalf("align carriage sides are not balanced: left=%d right=%d", left, right)
+	}
+}
+
+func TestAllCurriculumResetsKeepObjectAndTargetDistinct(t *testing.T) {
+	stages := []CurriculumStage{
+		CurriculumAlignAndContact,
+		CurriculumGrasp,
+		CurriculumLift,
+		CurriculumTransportAndRelease,
+		CurriculumFullPickAndPlace,
+	}
+	for _, stage := range stages {
+		t.Run(string(stage), func(t *testing.T) {
+			config := DefaultConfig()
+			config.Curriculum.Stage = stage
+			config.Curriculum.Randomization.Enabled = true
+			// Deliberately make the requested centres coincide. Reset must still
+			// create a real source-to-target transport task.
+			config.InitialObjectX = 3
+			config.TargetX = 3
+			task := NewTask(97, config)
+			minimumSeparation := (config.ObjectWidth+config.TargetWidth)/2 + config.HorizontalTolerance
+			for reset := 0; reset < 100; reset++ {
+				if _, err := task.Reset(); err != nil {
+					t.Fatal(err)
+				}
+				state := task.environment.state
+				if distance := math.Abs(state.TargetX - state.ObjectX); distance < minimumSeparation-1e-9 {
+					t.Fatalf("reset %d starts with overlapping object/target: distance=%v minimum=%v state=%#v", reset, distance, minimumSeparation, state)
+				}
+			}
+		})
 	}
 }
 
@@ -374,19 +436,37 @@ func TestGripBonusIsOneTimeAndExcessiveForceFails(t *testing.T) {
 	}
 }
 
-func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
-	task := NewTask(1, DefaultConfig())
-	_, _ = task.Reset()
-	advanceToPhase(t, task, PhaseMoveToTarget)
-	// The previous lift command decelerates under the low-level controller;
-	// settle it before asserting horizontal delivery progress.
-	for step := 0; step < 10 && task.environment.state.GripperVelocityY > 0; step++ {
-		if _, err := task.Step(framework.Action{0, -1, 0}); err != nil {
-			t.Fatal(err)
-		}
+func TestGripBonusCannotBePumpedAfterAReleaseAndRegrasp(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	environment := newEnvironment(41, config)
+	previous := State{Phase: PhaseGripObject, ObjectMass: config.InitialObjectMass, ObjectFriction: config.ObjectFriction, ObjectBreakForce: config.ObjectBreakForce}
+	environment.state = previous
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	environment.state.ContactBonusAwarded = true
+
+	first := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if got, want := first.Grip, config.Reward.SuccessfulGripReward; math.Abs(got-want) > 1e-9 || !environment.gripBonusAwarded {
+		t.Fatalf("first secure attachment reward=%v, want %v; latch=%v", got, want, environment.gripBonusAwarded)
 	}
+
+	// Model a later re-grasp transition. The episode latch, not the transient
+	// contact state, must prevent the sparse event reward from being collected
+	// a second time.
+	previous = environment.state
+	previous.Grip.ObjectAttached = false
+	second := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if second.Grip != 0 {
+		t.Fatalf("re-grasp pumped the one-time bonus: %#v", second)
+	}
+}
+
+func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
+	task := attachedTask(t, DefaultConfig())
+	task.environment.objectWasLifted = true
+	task.environment.state.Phase = PhaseMoveToTarget
 	progress, err := task.Step(framework.Action{1, 0, 0.5})
-	if err != nil || progress.Reward <= 0 {
+	if err != nil || progress.Info["delivery_reward"] <= 0 {
 		t.Fatalf("delivery progress=%#v error=%v", progress, err)
 	}
 
@@ -417,9 +497,10 @@ func TestTimeoutAndResetClearEpisodeState(t *testing.T) {
 	if err != nil || !result.Done || result.Outcome != OutcomeFailure {
 		t.Fatalf("timeout=%#v error=%v", result, err)
 	}
-	task.environment.gripBonusAwarded, task.environment.wasEverGrasped, task.environment.invalidGripPenaltyAwarded, task.environment.insufficientGripPenaltyAwarded, task.environment.emptyTargetPenaltyAwarded, task.environment.successRewardAwarded, task.environment.failureReason = true, true, true, true, true, true, "timeout"
+	task.environment.gripBonusAwarded, task.environment.wasEverGrasped, task.environment.objectWasLifted, task.environment.invalidGripPenaltyAwarded, task.environment.insufficientGripPenaltyAwarded, task.environment.emptyTargetPenaltyAwarded, task.environment.successRewardAwarded, task.environment.failureReason = true, true, true, true, true, true, true, "timeout"
+	task.environment.liftHoldFrames = 4
 	_, _ = task.Reset()
-	if task.environment.gripBonusAwarded || task.environment.wasEverGrasped || task.environment.invalidGripPenaltyAwarded || task.environment.insufficientGripPenaltyAwarded || task.environment.emptyTargetPenaltyAwarded || task.environment.successRewardAwarded || task.environment.failureReason != "" || task.environment.state.EpisodeStep != 0 || task.environment.state.Phase != PhaseApproachObject || task.environment.state.Grip.ObjectAttached {
+	if task.environment.gripBonusAwarded || task.environment.wasEverGrasped || task.environment.objectWasLifted || task.environment.liftHoldFrames != 0 || task.environment.invalidGripPenaltyAwarded || task.environment.insufficientGripPenaltyAwarded || task.environment.emptyTargetPenaltyAwarded || task.environment.successRewardAwarded || task.environment.failureReason != "" || task.environment.state.EpisodeStep != 0 || task.environment.state.Phase != PhaseApproachObject || task.environment.state.Grip.ObjectAttached {
 		t.Fatalf("reset retained episode state: %#v", task.environment)
 	}
 }
@@ -895,6 +976,7 @@ func TestVerticalAndGripActionSignFlipsReceiveFlutterPenalty(t *testing.T) {
 	config.Reward.ActionMagnitudePenaltyScale = 0
 	config.Reward.ActionDeltaPenaltyScale = 0
 	config.Reward.ActionFlipPenalty = 0.5
+	config.Reward.JerkYPenaltyScale = 0
 	environment := newEnvironment(19, config)
 	previous := State{ObjectMass: config.ObjectMass, ObjectFriction: config.ObjectFriction}
 	environment.state = previous
@@ -904,6 +986,77 @@ func TestVerticalAndGripActionSignFlipsReceiveFlutterPenalty(t *testing.T) {
 	want := -config.Reward.ActionFlipPenalty * (math.Abs(action[1]-lastAction[1]) + math.Abs(action[2]-lastAction[2]))
 	if math.Abs(reward.Smoothness-want) > 1e-9 {
 		t.Fatalf("flutter penalty = %v, want %v", reward.Smoothness, want)
+	}
+}
+
+func TestLoweringRetractionAndVerticalJerkAreMoreCostlyThanDirectDescent(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Reward.TimePenalty = 0
+	config.Reward.ActionMagnitudePenaltyScale = 0
+	config.Reward.ActionDeltaPenaltyScale = 0
+	config.Reward.ActionFlipPenalty = 0
+	config.Reward.HoverPenalty = 0
+	config.Reward.JerkYPenaltyScale = 0.2
+	config.Reward.UpwardRetractionPenalty = 0.4
+	config.Reward.RetractionDistancePenaltyScale = 0
+	config.Reward.LoweringStepPenalty = 0.02
+
+	graspY := GraspHeight(config, 0.6, 2)
+	previous := State{
+		CarriageX:      2,
+		ObjectX:        2,
+		ObjectY:        0.6,
+		GripperY:       graspY + 0.30,
+		ObjectMass:     config.ObjectMass,
+		ObjectFriction: config.ObjectFriction,
+		Phase:          PhaseLowerToObject,
+	}
+	retracting := newEnvironment(20, config)
+	retracting.state = previous
+	retracting.state.GripperY = graspY + 0.40
+	retraction := retracting.rewardWithActions(previous, [3]float64{0, 0.5, 0}, [3]float64{0, -0.5, 0})
+	if retraction.Retraction != -config.Reward.UpwardRetractionPenalty {
+		t.Fatalf("upward lower-phase motion missed retraction penalty: %#v", retraction)
+	}
+	if want := -config.Reward.JerkYPenaltyScale; math.Abs(retraction.Smoothness-want) > 1e-9 {
+		t.Fatalf("vertical jerk penalty = %v, want %v", retraction.Smoothness, want)
+	}
+
+	descending := newEnvironment(21, config)
+	descending.state = previous
+	descending.state.GripperY = graspY + 0.20
+	descent := descending.rewardWithActions(previous, [3]float64{0, -0.5, 0}, [3]float64{0, -0.5, 0})
+	if descent.Retraction != 0 || descent.Total <= retraction.Total {
+		t.Fatalf("direct descent was not preferred to ratcheting retraction: descent=%#v retract=%#v", descent, retraction)
+	}
+}
+
+func TestAlignedLoweringRejectsUpwardCommandAndMakesRetractionStrictlyCostly(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	environment := newEnvironment(43, config)
+	graspY := GraspHeight(config, 0.6, 2)
+	environment.state = State{
+		CarriageX:      2,
+		ObjectX:        2,
+		ObjectY:        0.6,
+		GripperY:       graspY + 0.30,
+		ObjectMass:     config.ObjectMass,
+		ObjectFriction: config.ObjectFriction,
+		Phase:          PhaseLowerToObject,
+	}
+	initialY := environment.state.GripperY
+	environment.applyVerticalControl(1)
+	if !environment.verticalRetractionBlocked || environment.state.GripperY > initialY || environment.state.GripperVelocityY > 0 {
+		t.Fatalf("aligned lower phase accepted retraction: blocked=%v state=%#v", environment.verticalRetractionBlocked, environment.state)
+	}
+
+	previous := environment.state
+	environment.state.GripperY += 0.05 // residual upward motion is also costly.
+	penalty := environment.rewardWithActions(previous, [3]float64{0, 0.5, 0}, [3]float64{0, -0.5, 0})
+	if penalty.Retraction >= -config.Reward.UpwardRetractionPenalty || penalty.Total >= 0 {
+		t.Fatalf("retraction did not receive a strict negative reward: %#v", penalty)
 	}
 }
 
@@ -926,8 +1079,8 @@ func TestFullTaskDoesNotPayForHoldingStill(t *testing.T) {
 	}
 	environment.state = previous
 	reward := environment.reward(previous, 0, 0, 0)
-	if reward.Grip != 0 || reward.Delivery != 0 {
-		t.Fatalf("full task must not reward an attached object that makes no progress: %#v", reward)
+	if reward.Grip <= 0 || reward.Delivery != 0 || reward.Total >= 0 {
+		t.Fatalf("full task stationary hold must receive only a sub-time-cost maintenance signal: %#v", reward)
 	}
 }
 
@@ -1235,9 +1388,12 @@ func TestFullPickAndPlaceRewardIncludesSecureHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	minimumHoldReward := config.Reward.AttachedForceStabilityReward + config.Reward.GraspHoldRewardPerSecond*config.TimeStep
+	minimumHoldReward := config.Reward.AttachedHoldRewardPerSecond * config.TimeStep
 	if !task.environment.state.Grip.ObjectAttached || task.environment.state.Grip.Slipping || float64(result.Info["grip_reward"])+1e-6 < minimumHoldReward {
 		t.Fatalf("full pick-and-place secure hold did not receive time-scaled reward: state=%#v info=%#v", task.environment.state.Grip, result.Info)
+	}
+	if config.Reward.AttachedHoldRewardPerSecond*config.TimeStep >= -config.Reward.TimePenalty {
+		t.Fatalf("full-task hold reward must remain below per-step time cost: hold/step=%v time/step=%v", config.Reward.AttachedHoldRewardPerSecond*config.TimeStep, -config.Reward.TimePenalty)
 	}
 }
 
@@ -1306,8 +1462,8 @@ func TestCurriculumResetsUseRealStateAndTerminalCriteria(t *testing.T) {
 	if _, err := grasp.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	if grasp.environment.state.Phase != PhaseApproachObject || grasp.environment.state.Grip.ObjectAttached {
-		t.Fatalf("grasp curriculum must begin detached and require a learned approach/attachment: %#v", grasp.environment.state)
+	if grasp.environment.state.Phase != PhaseGripObject || !grasp.environment.state.Grip.ContactDetected || grasp.environment.state.Grip.ObjectAttached {
+		t.Fatalf("reverse grasp curriculum must begin in detached physical contact: %#v", grasp.environment.state)
 	}
 
 	liftConfig := DefaultConfig()
@@ -1364,6 +1520,87 @@ func TestGraspCurriculumRequiresContinuousSecureHold(t *testing.T) {
 	environment.updatePhase(environment.state)
 	if environment.state.Phase != PhaseSuccess {
 		t.Fatalf("grasp did not succeed after %d uninterrupted secure frames: %#v", requiredFrames, environment.state)
+	}
+}
+
+func TestLiftCurriculumRequiresContinuousCarryHeightHold(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumLift
+	config.Curriculum.LiftHoldFrames = 3
+	environment := newEnvironment(33, config)
+	environment.reset()
+	environment.state.Phase = PhaseLiftObject
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	environment.state.GripForce = environment.requiredForce()
+	environment.state.ObjectY = environment.requiredCarryHeight()
+
+	for frame := 1; frame < config.Curriculum.LiftHoldFrames; frame++ {
+		environment.updatePhase(environment.state)
+		if environment.state.Phase == PhaseSuccess || environment.liftHoldFrames != frame {
+			t.Fatalf("lift succeeded after %d/%d verified frames: phase=%s hold=%d", frame, config.Curriculum.LiftHoldFrames, environment.state.Phase, environment.liftHoldFrames)
+		}
+	}
+	environment.updatePhase(environment.state)
+	if environment.state.Phase != PhaseSuccess || environment.liftHoldFrames != config.Curriculum.LiftHoldFrames {
+		t.Fatalf("lift did not succeed after verified hold: phase=%s hold=%d", environment.state.Phase, environment.liftHoldFrames)
+	}
+
+	environment.state.Phase = PhaseLiftObject
+	environment.state.Grip.Slipping = true
+	environment.updatePhase(environment.state)
+	if environment.liftHoldFrames != 0 || environment.state.Phase == PhaseSuccess {
+		t.Fatalf("slipping did not reset lift hold verification: phase=%s hold=%d", environment.state.Phase, environment.liftHoldFrames)
+	}
+}
+
+func TestMidAirDropIsTerminalAndUsesDedicatedPenalty(t *testing.T) {
+	config := DefaultConfig()
+	environment := newEnvironment(34, config)
+	environment.reset()
+	environment.objectWasLifted = true
+	environment.state.ObjectX = environment.state.TargetX + config.TargetWidth
+	environment.state.ObjectY = environment.requiredCarryHeight()
+	environment.state.Grip = GripState{}
+
+	if reason := environment.detectFailure(environment.state); reason != "mid_air_drop" {
+		t.Fatalf("lifted detach outside target reason=%q, want mid_air_drop", reason)
+	}
+	if got, want := environment.failurePenalty("mid_air_drop"), config.Reward.MidAirDropPenalty; got != want {
+		t.Fatalf("mid-air drop penalty=%v, want %v", got, want)
+	}
+}
+
+func TestTransportProgressRequiresLiftedAttachedObjectAndIsSigned(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	environment := newEnvironment(35, config)
+	environment.reset()
+	attached := GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	previous := environment.state
+	previous.Phase = PhaseMoveToTarget
+	previous.ObjectX, previous.TargetX = 2, 4
+	previous.Grip = attached
+	previous.GripForce = environment.requiredForce()
+	environment.state = previous
+	environment.state.ObjectX = 3 // one metre closer to target
+	environment.objectWasLifted = true
+
+	toward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if want := config.Reward.TransportProgressScale; math.Abs(toward.Delivery-want) > 1e-9 {
+		t.Fatalf("transport reward toward target=%v, want %v", toward.Delivery, want)
+	}
+
+	previous = environment.state
+	environment.state.ObjectX = 2 // one metre away from target
+	away := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if want := -config.Reward.TransportProgressScale; math.Abs(away.Delivery-want) > 1e-9 {
+		t.Fatalf("transport reward away from target=%v, want %v", away.Delivery, want)
+	}
+
+	environment.objectWasLifted = false
+	withoutLift := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if withoutLift.Delivery != 0 {
+		t.Fatalf("unverified attachment received transport reward: %#v", withoutLift)
 	}
 }
 
@@ -1767,6 +2004,7 @@ func TestDeliveryRewardRequiresAttachedObject(t *testing.T) {
 
 	attached := attachedTask(t, config)
 	attached.environment.state.Phase = PhaseMoveToTarget
+	attached.environment.objectWasLifted = true
 	result, err = attached.Step(framework.Action{1, 0, 0.5})
 	if err != nil {
 		t.Fatal(err)
@@ -1783,11 +2021,13 @@ func TestAttachedTransportAwayFromTargetIsNotProfitable(t *testing.T) {
 	env.state.Phase = PhaseMoveToTarget
 	env.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true, Slipping: false}
 	env.state.GripForce = env.requiredForce()
+	env.state.ContactBonusAwarded = true
 	env.state.CarriageX = 3.5
 	env.state.ObjectX = 3.5
 	env.state.ObjectY = 1.2
 	env.state.TargetX = 4.5
 	env.state.TargetY = 1.2
+	env.objectWasLifted = true
 	env.lastEnergyDelta = 0.18
 
 	previous := env.state
@@ -1804,7 +2044,7 @@ func TestAttachedTransportAwayFromTargetIsNotProfitable(t *testing.T) {
 	env.state.TargetY = 1.2
 
 	reward := env.reward(previous, 0.0, 0.0, 0.0)
-	if reward.Delivery >= 0 || reward.Total >= 0 || math.Abs(reward.Penalty) > 1e-9 {
+	if reward.Delivery >= 0 || reward.Total >= 0 {
 		t.Fatalf("attached drift away from target remained profitable: delivery=%v total=%v reward=%+v", reward.Delivery, reward.Total, reward)
 	}
 }
@@ -1814,13 +2054,14 @@ func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
 	config.Homeostasis.Enabled = true
 	task := attachedTask(t, config)
 	task.environment.state.Phase = PhaseMoveToTarget
+	task.environment.objectWasLifted = true
 	previousEnergy := task.environment.state.Energy
 	result, err := task.Step(framework.Action{0, 0, -1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Done || result.Outcome != OutcomeFailure || result.Reward > float32(task.config.Reward.DroppedObjectPenalty) {
-		t.Fatalf("transport drop was not penalized: %#v", result)
+	if !result.Done || result.Outcome != OutcomeFailure || result.Reward > float32(task.config.Reward.MidAirDropPenalty) || result.Info["failure_reason_code"] != 8 {
+		t.Fatalf("mid-air transport drop was not penalized: %#v", result)
 	}
 	if got, want := task.environment.state.Energy, previousEnergy-task.config.Homeostasis.EnergyDecayPerStep-task.config.Homeostasis.UnsafeDropEnergyLoss; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != float32(energyEventUnsafeDrop) {
 		t.Fatalf("unsafe drop energy loss mismatch: got=%v want=%v info=%#v", got, want, result.Info)

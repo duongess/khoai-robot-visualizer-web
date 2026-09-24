@@ -39,6 +39,27 @@ const OBJECT_STATUS_STYLES: Record<
     glow: '#2563eb',
     badge: 'GRASPING',
   },
+	attached: {
+		border: '#38bdf8',
+		fill: 'rgba(56, 189, 248, 0.4)',
+		text: '#bae6fd',
+		glow: '#0284c7',
+		badge: 'ATTACHED',
+	},
+	transported: {
+		border: '#0284c7',
+		fill: 'rgba(2, 132, 199, 0.45)',
+		text: '#e0f2fe',
+		glow: '#0284c7',
+		badge: 'TRANSPORTED',
+	},
+	released: {
+		border: '#fbbf24',
+		fill: 'rgba(251, 191, 36, 0.35)',
+		text: '#fef08a',
+		glow: '#d97706',
+		badge: 'RELEASED',
+	},
   grasped: {
     border: '#38bdf8',
     fill: 'rgba(56, 189, 248, 0.4)',

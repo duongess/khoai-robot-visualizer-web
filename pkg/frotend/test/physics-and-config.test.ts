@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert';
-import { DEFAULT_SCENE_CONFIG } from '../src/lib/mock-telemetry-client';
+import { DEFAULT_SCENE_CONFIG } from '../src/lib/default-scene-config';
 
 describe('Force-Control Physics Formulas and Status Rules', () => {
   // Formula: F_required = m(g + a) / (2μ)
@@ -55,12 +55,13 @@ describe('Force-Control Physics Formulas and Status Rules', () => {
 
 describe('Scene Configuration Defaults & Validation', () => {
   test('default scene configuration satisfies all boundary conditions', () => {
-    const { object, robot, terrain } = DEFAULT_SCENE_CONFIG;
+    const { object, gantry, terrain, workspace } = DEFAULT_SCENE_CONFIG;
 
     assert.ok(object.mass > 0, 'Object mass must be positive');
     assert.ok(object.friction > 0 && object.friction <= 2.0, 'Friction must be valid');
     assert.ok(object.break_force > 0, 'Break force must be positive');
-    assert.ok(robot.maximum_grip_force > robot.minimum_grip_force, 'Max grip force must exceed min');
+    assert.ok(gantry.maximum_grip_force > gantry.minimum_grip_force, 'Max grip force must exceed min');
+		assert.ok(workspace && workspace.maxY === 3.2, 'Workspace must use backend-compatible bounds');
     assert.ok(terrain.gravity > 0, 'Gravity must be positive');
   });
 });

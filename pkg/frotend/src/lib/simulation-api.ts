@@ -26,8 +26,11 @@ export async function updateSceneApi(payload: SceneUpdatePayload): Promise<ApiSc
         config: data.config,
       };
     } else {
-      const errJson = await res.json().catch(() => null);
-      const errorMsg = errJson?.error || `Server responded with status ${res.status}`;
+      const errJson = await res.json().catch(() => null) as { error?: string | { code?: string; message?: string } } | null;
+      const errorValue = errJson?.error;
+      const errorMsg = typeof errorValue === 'string'
+        ? errorValue
+        : errorValue?.message || `Server responded with status ${res.status}`;
       return { success: false, error: errorMsg };
     }
   } catch (error) {

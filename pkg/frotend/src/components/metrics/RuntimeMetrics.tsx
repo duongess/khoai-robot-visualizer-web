@@ -45,7 +45,7 @@ export const RuntimeMetrics: React.FC = () => {
     {
       id: 'metric-active-workers',
       label: 'Active Workers',
-      value: r?.active_workers ?? 100,
+      value: r?.active_workers ?? 0,
       subtext: 'Concurrent threads',
       icon: Cpu,
       color: 'text-sky-400',
@@ -53,7 +53,7 @@ export const RuntimeMetrics: React.FC = () => {
     {
       id: 'metric-steps-sec',
       label: 'Env Steps / sec',
-      value: (r?.steps_per_second ?? 32421).toLocaleString(),
+      value: (r?.steps_per_second ?? 0).toLocaleString(),
       subtext: 'High-throughput physics',
       icon: Zap,
       color: 'text-amber-400',
@@ -61,7 +61,7 @@ export const RuntimeMetrics: React.FC = () => {
     {
       id: 'metric-episodes-sec',
       label: 'Episodes / sec',
-      value: (r?.episodes_per_second ?? 124).toLocaleString(),
+      value: (r?.episodes_per_second ?? 0).toLocaleString(),
       subtext: 'Completed runs',
       icon: Clock,
       color: 'text-slate-300',
@@ -69,7 +69,7 @@ export const RuntimeMetrics: React.FC = () => {
     {
       id: 'metric-total-steps',
       label: 'Total Env Steps',
-      value: (r?.total_steps ?? 840210).toLocaleString(),
+      value: (r?.total_steps ?? 0).toLocaleString(),
       subtext: 'Total transitions',
       icon: Hash,
       color: 'text-slate-200',

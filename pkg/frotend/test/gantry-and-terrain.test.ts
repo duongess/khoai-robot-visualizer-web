@@ -7,7 +7,7 @@ import {
   canvasToWorld,
   getTerrainHeightAt,
 } from '../src/components/simulation/coordinate-system';
-import { DEFAULT_SCENE_CONFIG } from '../src/lib/mock-telemetry-client';
+import { DEFAULT_SCENE_CONFIG } from '../src/lib/default-scene-config';
 import { TerrainPoint } from '../src/types/simulation';
 
 describe('Coordinate Conversion and Fixed Viewport', () => {
@@ -26,6 +26,13 @@ describe('Coordinate Conversion and Fixed Viewport', () => {
       Math.abs(convertedBack.y - worldPoint.y) < 0.001,
       `Expected Y ${worldPoint.y}, got ${convertedBack.y}`
     );
+  });
+
+  test('world top renders above world bottom with exactly one Y inversion', () => {
+    const transform = getCanvasTransform(800, 600, DEFAULT_WORLD_BOUNDS, 20);
+    const top = worldToCanvas({ x: 3, y: DEFAULT_WORLD_BOUNDS.maxY }, transform);
+    const bottom = worldToCanvas({ x: 3, y: DEFAULT_WORLD_BOUNDS.minY }, transform);
+    assert.ok(top.y < bottom.y, `top=${top.y}, bottom=${bottom.y}`);
   });
 
   test('aspect ratio is preserved and world bounds fit within canvas', () => {

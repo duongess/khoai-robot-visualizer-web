@@ -1,11 +1,9 @@
 import { WorldBounds, TerrainPoint } from '../../types/simulation';
+import { DEFAULT_SCENE_CONFIG } from '../../lib/default-scene-config';
 
-export const DEFAULT_WORLD_BOUNDS: WorldBounds = {
-  minX: 0.0,
-  maxX: 6.0,
-  minY: 0.0,
-  maxY: 3.2,
-};
+// Bootstrap fallback only; a running canvas replaces this with backend
+// workspace telemetry. Keeping it derived avoids a second hard-coded world.
+export const DEFAULT_WORLD_BOUNDS: WorldBounds = { ...DEFAULT_SCENE_CONFIG.workspace! };
 
 export interface CanvasTransform {
   scale: number;

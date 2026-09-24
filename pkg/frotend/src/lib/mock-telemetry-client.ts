@@ -416,6 +416,9 @@ class MockTelemetryClient {
       },
       last_action: {
         normalized_grip_force: Number((currentWorker.gripForce / this.config.gantry.maximum_grip_force).toFixed(3)),
+        force_rate_command: 0,
+        force_rate_newtons_per_second: 0,
+        force_action_mode: 'hold',
       },
       last_reward: Number(currentWorker.lastReward.toFixed(2)),
       done: currentWorker.done,

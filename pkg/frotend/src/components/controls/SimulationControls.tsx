@@ -1,9 +1,14 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useSimulationStore } from '../../lib/simulation-store';
-import { Play, Pause, RotateCw, RefreshCw, Layers, ShieldCheck, AlertTriangle } from 'lucide-react';
-import { SimulationMode } from '../../types/simulation';
+import { runtimeClient } from '../../lib/runtime-client';
+import { Play, Pause, RotateCw, RefreshCw, Layers, AlertTriangle, CheckCircle2, Save } from 'lucide-react';
+import { ControlMode, SimulationMode } from '../../types/simulation';
 
 export const SimulationControls: React.FC = () => {
+	const [modelFeedback, setModelFeedback] = useState<string | null>(null);
+	const [savingModel, setSavingModel] = useState(false);
+	const [switchingControl, setSwitchingControl] = useState(false);
+	const [controlFeedback, setControlFeedback] = useState<string | null>(null);
   const {
     runtimeStatus,
     selectedMode,
@@ -11,6 +16,7 @@ export const SimulationControls: React.FC = () => {
     pauseSimulation,
     resumeSimulation,
     resetSimulation,
+		approveCurriculumReview,
     requestModeChange,
     selectedWorkerId,
     setSelectedWorker,
@@ -18,12 +24,43 @@ export const SimulationControls: React.FC = () => {
     pendingMode,
     confirmModeChange,
     cancelModeChange,
+		latestTelemetry,
   } = useSimulationStore();
+	const controlMode = latestTelemetry?.worker.control?.control_mode ?? 'residual';
 
   const isRunning = runtimeStatus === 'running';
   const isPaused = runtimeStatus === 'paused';
   const isStopped = runtimeStatus === 'stopped';
   const isResetting = runtimeStatus === 'resetting';
+
+	const saveModel = async () => {
+		setSavingModel(true);
+		setModelFeedback(null);
+		try {
+			const result = await runtimeClient.command<{ model_name: string; policy_version: number; training_step: number }>(
+				'/api/model/save',
+			);
+			setModelFeedback(`Saved ${result.model_name} · policy v${result.policy_version}`);
+		} catch (error) {
+			setModelFeedback(error instanceof Error ? error.message : 'Could not save model.');
+		} finally {
+			setSavingModel(false);
+		}
+	};
+
+	const switchControlMode = async (mode: ControlMode) => {
+		if (mode === controlMode || switchingControl) return;
+		setSwitchingControl(true);
+		setControlFeedback(null);
+		try {
+			await runtimeClient.command<{ control_mode: ControlMode; episodes_reset: boolean }>('/api/control-mode', { control_mode: mode });
+			setControlFeedback(`Control: ${mode.replace('_', ' ')} · new episodes started`);
+		} catch (error) {
+			setControlFeedback(error instanceof Error ? error.message : 'Could not switch control mode.');
+		} finally {
+			setSwitchingControl(false);
+		}
+	};
 
   const statusBadge = {
     running: { label: 'Running', bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', text: 'text-emerald-400', dot: 'bg-emerald-400' },
@@ -97,7 +134,44 @@ export const SimulationControls: React.FC = () => {
             <span>Reset</span>
           </button>
 
-          {/* Runtime Status Pill */}
+			<div className="flex items-center gap-1.5 ml-1">
+				<button
+					id="control-save-model-btn"
+					onClick={() => void saveModel()}
+					disabled={savingModel}
+					title="Save a complete SAC checkpoint. A name creates or overwrites that model; blank overwrites the active named model."
+					className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+						savingModel
+							? 'bg-slate-800/40 text-slate-500 border-slate-800 cursor-wait'
+							: 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500'
+					}`}
+				>
+					<Save className="w-4 h-4" />
+					<span>{savingModel ? 'Saving…' : 'Save Model'}</span>
+				</button>
+			</div>
+			{modelFeedback && (
+				<span className={`text-[11px] font-mono ${modelFeedback.startsWith('Saved') ? 'text-emerald-400' : 'text-red-400'}`}>
+					{modelFeedback}
+				</span>
+			)}
+
+			<button
+				id="control-approve-curriculum-btn"
+				onClick={() => void approveCurriculumReview()}
+				disabled={!isPaused}
+				title="Advance the selected automatic-curriculum worker without recording a synthetic success reward."
+				className={`flex items-center gap-2 px-3.5 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+					!isPaused
+						? 'bg-slate-800/40 text-slate-500 border-slate-800 cursor-not-allowed'
+						: 'bg-violet-600 hover:bg-violet-500 text-white border-violet-500'
+				}`}
+			>
+				<CheckCircle2 className="w-4 h-4" />
+				<span>Review &amp; Advance</span>
+			</button>
+
+			{/* Runtime Status Pill */}
           <div
             id="runtime-status-pill"
             className={`ml-2 flex items-center gap-2 px-3 py-1 rounded-full text-xs font-mono font-medium border ${statusBadge.bg} ${statusBadge.border} ${statusBadge.text}`}
@@ -109,6 +183,36 @@ export const SimulationControls: React.FC = () => {
 
         {/* Center/Right Section: Mode Selector & Worker Switcher */}
         <div className="flex items-center gap-4">
+			{/* Physical command-composition selector. This is independent of the
+			    Swarm/Independent runtime selector below. */}
+			<div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 p-1 rounded-lg">
+				<span className="text-xs text-slate-400 px-2 font-mono">Control:</span>
+				{([
+					['base_only', 'Base only'],
+					['residual', 'Residual'],
+					['pure_rl', 'Pure RL'],
+				] as const).map(([mode, label]) => (
+					<button
+						key={mode}
+						id={`control-mode-${mode}-btn`}
+						onClick={() => void switchControlMode(mode)}
+						disabled={switchingControl}
+						className={`px-2.5 py-1 rounded text-xs font-medium transition-all ${
+							controlMode === mode
+								? 'bg-violet-500 text-white font-semibold shadow-xs'
+								: 'text-slate-400 hover:text-slate-200 disabled:text-slate-600'
+						}`}
+					>
+						{label}
+					</button>
+				))}
+			</div>
+			{controlFeedback && (
+				<span className={`text-[11px] font-mono ${controlFeedback.startsWith('Control:') ? 'text-emerald-400' : 'text-red-400'}`}>
+					{controlFeedback}
+				</span>
+			)}
+
           {/* Mode Selector */}
           <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 p-1 rounded-lg">
             <span className="text-xs text-slate-400 px-2 font-mono flex items-center gap-1">

@@ -1,10 +1,14 @@
-export type RuntimeStatus = 'stopped' | 'running' | 'paused' | 'resetting' | 'error';
+export type RuntimeStatus = 'stopped' | 'running' | 'paused' | 'stalled' | 'resetting' | 'error';
 export type SimulationMode = 'independent' | 'swarm';
+export type ControlMode = 'base_only' | 'residual' | 'pure_rl';
 
 export type ObjectStatus =
   | 'idle'
   | 'targeted'
   | 'grasping'
+	| 'attached'
+	| 'transported'
+	| 'released'
   | 'grasped'
   | 'lifting'
   | 'carrying'
@@ -15,6 +19,17 @@ export type ObjectStatus =
   | 'broken';
 
 export type TaskPhase =
+  | 'idle'
+  | 'approach_object'
+  | 'lower_to_object'
+  | 'grip_object'
+  | 'lift_object'
+  | 'move_to_target'
+  | 'lower_at_target'
+  | 'release_object'
+  | 'success'
+  | 'failure'
+  // Legacy mock-only values retained until the mock telemetry fixture is removed.
   | 'approach_horizontal'
   | 'lower'
   | 'open'
@@ -77,6 +92,8 @@ export interface TerrainConfig {
 }
 
 export interface SceneConfig {
+	control_mode?: ControlMode;
+	workspace?: WorldBounds & { coordinate_system_version?: number };
   object: ObjectConfig;
   gantry: GantryConfig;
   terrain: TerrainConfig;
@@ -100,11 +117,35 @@ export interface RuntimeMetrics {
   steps_per_second: number;
   episodes_per_second: number;
   total_steps: number;
-  success_rate: number;
+	success_rate: number;
+	contact_rate?: number;
+	attachment_rate?: number;
   average_reward: number;
   replay_buffer_size: number;
   training_batches: number;
   policy_version: number;
+	training_step?: number;
+	total_episodes?: number;
+	actor_loss?: number;
+	critic_loss?: number;
+	alpha_loss?: number;
+	entropy?: number;
+	critic_one_q?: number;
+	critic_two_q?: number;
+	alpha?: number;
+	actor_log_std?: number[];
+	action_statistics?: {
+		samples: number;
+		raw_mean: number[];
+		raw_std: number[];
+		filtered_mean: number[];
+		filtered_std: number[];
+		dead_zone_removed_fraction: number[];
+		filter_modified_fraction: number[];
+	};
+	phase_occupancy?: Record<string, number>;
+	failure_reasons?: Record<string, number>;
+  last_error?: string;
 }
 
 export interface GantryState {
@@ -153,22 +194,110 @@ export interface WorkerState {
   episode_id: number;
   episode_step: number;
   task_phase: TaskPhase;
+	action_source?: 'policy' | 'random_warmup' | 'pending';
+	curriculum_stage?: 'auto' | 'align-and-contact' | 'grasp' | 'lift' | 'transport-and-release' | 'full-pick-and-place' | 'lower-and-contact' | 'grasp-and-lift';
+	gripper_state?: 'open' | 'closed';
+	contact_state?: 'none' | 'contact';
+	force_valid?: boolean;
   gantry: GantryState;
   robot?: RobotState; // compatibility shim
   object: ObjectState;
   target: {
     position_x: number;
+    position_y?: number;
     width: number;
+  };
+  workspace?: WorldBounds & {
+    safeMinX: number;
+    safeMaxX: number;
+    safeMinY: number;
+    safeMaxY: number;
+    boundaryHit: boolean;
+    coordinate_system_version: number;
   };
   terrain: {
     points: TerrainPoint[];
   };
   last_action: {
     normalized_grip_force: number;
+		horizontal?: number;
+		vertical?: number;
+		gripper?: number;
+		filtered_horizontal?: number;
+		filtered_vertical?: number;
+		filtered_gripper?: number;
+		dead_zone_removed_horizontal?: boolean;
+		dead_zone_removed_vertical?: boolean;
+		dead_zone_removed_gripper?: boolean;
+    force_rate_command?: number;
+    force_rate_newtons_per_second?: number;
+    force_action_mode?: 'increase' | 'hold' | 'decrease' | 'release';
   };
   last_reward: number;
+  cumulative_reward?: number;
+  distance_to_object?: number;
+  distance_to_target?: number;
   done: boolean;
   outcome: string;
+  latest_vertical_action?: number;
+	episode_policy_version?: number;
+	control?: {
+		dt: number;
+		carriage_x: number;
+		gripper_y: number;
+		velocity_x: number;
+		velocity_y: number;
+		phase_numeric?: number;
+		raw_vertical_action?: number;
+		raw_horizontal_action?: number;
+		raw_gripper_action?: number;
+		filtered_horizontal_action?: number;
+		filtered_vertical_action?: number;
+		filtered_gripper_action?: number;
+		control_mode?: ControlMode;
+		base_enabled?: boolean;
+		residual_enabled?: boolean;
+		base_action?: { horizontal: number; vertical: number; gripper: number };
+		residual_action?: { horizontal: number; vertical: number; gripper: number };
+		final_action?: { horizontal: number; vertical: number; gripper: number };
+		applied_action?: { horizontal: number; vertical: number; gripper: number };
+		boundary_hit?: boolean;
+		error_x: number;
+		error_y: number;
+		vertical_acceleration?: number;
+		invalid_contact_frames?: number;
+		slip_severity?: number;
+		slip_frames?: number;
+	};
+  velocity_y?: number;
+  target_grasp_y?: number;
+  vertical_error?: number;
+	contact_detected?: boolean;
+	object_attached?: boolean;
+	object_stable?: boolean;
+	slipping?: boolean;
+	contact_episode_successes?: number;
+	contact_episode_successes_required?: number;
+	grasp_hold_frames?: number;
+	grasp_hold_frames_required?: number;
+	homeostasis?: {
+		enabled: boolean;
+		energy: number;
+		delta: number;
+		decay: number;
+		food_gain: number;
+		reward: number;
+		event: string;
+	};
+	approach_reward?: number;
+	contact_reward?: number;
+	grip_reward?: number;
+	lift_reward?: number;
+	delivery_reward?: number;
+	success_reward?: number;
+	detached_force_penalty?: number;
+	penalty_reward?: number;
+	total_step_reward?: number;
 }
 
 export interface SimulationSnapshot {

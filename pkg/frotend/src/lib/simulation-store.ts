@@ -12,6 +12,7 @@ import { DEFAULT_SCENE_CONFIG } from './default-scene-config';
 import { runtimeClient } from './runtime-client';
 import { updateSceneApi } from './simulation-api';
 import { DEFAULT_FLAT_TERRAIN_POINTS } from '../components/simulation/editable-terrain';
+import { getTerrainHeightAt } from '../components/simulation/coordinate-system';
 
 export type SelectedEntityType = 'object' | 'carriage' | 'gripper' | 'terrain_point' | 'target' | null;
 
@@ -49,6 +50,7 @@ export interface SimulationStore {
   pauseSimulation: () => Promise<void>;
   resumeSimulation: () => Promise<void>;
   resetSimulation: () => Promise<void>;
+	approveCurriculumReview: () => Promise<void>;
   requestModeChange: (mode: SimulationMode) => void;
   confirmModeChange: () => void;
   cancelModeChange: () => void;
@@ -161,6 +163,20 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     set({ runtimeStatus: 'resetting', selectedEntity: null, isDraggingEntity: false });
   },
 
+	approveCurriculumReview: async () => {
+		const { runtimeStatus, selectedWorkerId } = get();
+		if (runtimeStatus !== 'paused') {
+			set({ configError: 'Pause the simulation before approving a curriculum review.' });
+			return;
+		}
+		try {
+			await runtimeClient.command('/api/evaluation/approve', { worker_id: selectedWorkerId });
+			set({ selectedEntity: null, isDraggingEntity: false, configError: null });
+		} catch (error) {
+			set({ configError: error instanceof Error ? error.message : 'Curriculum review was rejected.' });
+		}
+	},
+
   requestModeChange: (mode: SimulationMode) => {
     if (mode === get().selectedMode) return;
     set({
@@ -203,9 +219,13 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
   updateDraftObject: (updates) => {
     const current = get().draftConfig;
+		const object = { ...current.object, ...updates };
+		if (updates.position_x !== undefined || updates.height !== undefined) {
+			object.position_y = getTerrainHeightAt(object.position_x, current.terrain.points) + object.height / 2;
+		}
     const nextConfig = {
       ...current,
-      object: { ...current.object, ...updates },
+			object,
     };
     set({ draftConfig: nextConfig, isDraftDirty: true, configError: null });
   },
@@ -230,9 +250,17 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
 
   updateDraftTerrain: (updates) => {
     const current = get().draftConfig;
+		const terrain = { ...current.terrain, ...updates };
     const nextConfig = {
       ...current,
-      terrain: { ...current.terrain, ...updates },
+			terrain,
+			// Resting-object Y is derived, never an independently editable scene
+			// coordinate. Keeping the draft synchronized prevents a terrain edit
+			// from visually embedding the object before the backend reset occurs.
+			object: {
+				...current.object,
+				position_y: getTerrainHeightAt(current.object.position_x, terrain.points) + current.object.height / 2,
+			},
     };
     set({ draftConfig: nextConfig, isDraftDirty: true, configError: null });
   },

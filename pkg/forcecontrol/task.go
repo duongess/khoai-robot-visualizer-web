@@ -2,6 +2,7 @@ package forcecontrol
 
 import (
 	"errors"
+	"math"
 
 	"github.com/duongess/khoai-robot-control-framework/pkg/framework"
 )
@@ -23,6 +24,9 @@ type Task struct {
 }
 
 var _ framework.Task = (*Task)(nil)
+var _ framework.DecomposedActionTask = (*Task)(nil)
+var _ framework.ReviewableTask = (*Task)(nil)
+var _ framework.TelemetryTask = (*Task)(nil)
 
 // NewTask creates an independent force-control task instance.
 func NewTask(seed int64, config Config) *Task {
@@ -34,16 +38,172 @@ func (t *Task) Reset() (framework.State, error) {
 		return nil, errors.New("force-control task is not initialized")
 	}
 	t.environment.reset()
+	if err := t.environment.ValidateState(); err != nil {
+		return nil, err
+	}
 	return t.environment.observation(), nil
 }
 
+// ApproveCurriculumReview is called only by the paused runtime review path.
+// It advances a curriculum distribution without claiming a physical success.
+func (t *Task) ApproveCurriculumReview() error {
+	if t == nil || t.environment == nil {
+		return errors.New("force-control task is not initialized")
+	}
+	return t.environment.approveCurriculumReview()
+}
+
+// TelemetryMetadata returns a fresh immutable snapshot of task-owned data
+// that is not encoded in the fixed-size policy observation. The framework
+// uses it only for visualization; it never feeds this data back to the actor.
+func (t *Task) TelemetryMetadata() map[string]any {
+	if t == nil || t.environment == nil {
+		return nil
+	}
+	terrain := append([]TerrainPoint(nil), t.environment.config.Terrain...)
+	return map[string]any{
+		"terrain_points":                        terrain,
+		"curriculum_contact_success_streak":     t.environment.contactSuccessStreak,
+		"curriculum_contact_successes_required": t.config.Curriculum.ContactSuccessesRequired,
+		"curriculum_grasp_hold_frames":          t.environment.secureGripHoldFrames,
+		"curriculum_grasp_hold_frames_required": t.environment.requiredGraspHoldFrames(),
+	}
+}
+
 func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
+	return t.step(action, nil, nil)
+}
+
+// StepDecomposed receives all three outputs from the same immutable actor
+// snapshot. The selected runtime control mode decides which vector reaches the
+// plant; no task-solving script participates in that decision.
+func (t *Task) StepDecomposed(final, flyBase, residual framework.Action) (framework.StepResult, error) {
+	return t.step(final, flyBase, residual)
+}
+
+func (t *Task) step(action, flyBase, residual framework.Action) (framework.StepResult, error) {
 	if t == nil || t.environment == nil {
 		return framework.StepResult{}, errors.New("force-control task is not initialized")
 	}
-	_, reward, outcome, done, err := t.environment.step(action)
+	_, reward, outcome, done, err := t.environment.stepDecomposed(action, flyBase, residual)
 	if err != nil {
 		return framework.StepResult{}, err
 	}
-	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done}, nil
+	state, breakdown := t.environment.state, t.environment.lastReward
+	info := map[string]float32{
+		"raw_action_horizontal":                 actionValue(action, 0),
+		"raw_action_vertical":                   actionValue(action, 1),
+		"raw_action_gripper":                    actionValue(action, 2),
+		"filtered_action_horizontal":            float32(t.environment.filteredAction[0]),
+		"filtered_action_vertical":              float32(t.environment.filteredAction[1]),
+		"filtered_action_gripper":               float32(t.environment.filteredAction[2]),
+		"control_mode_code":                     float32(t.config.EffectiveControlMode().code()),
+		"base_control_enabled":                  float32(boolToFloat(t.config.EffectiveControlMode() != ModePureRL)),
+		"residual_control_enabled":              float32(boolToFloat(t.config.EffectiveControlMode() == ModeResidual)),
+		"base_action_horizontal":                float32(t.environment.baseAction[0]),
+		"base_action_vertical":                  float32(t.environment.baseAction[1]),
+		"base_action_gripper":                   float32(t.environment.baseAction[2]),
+		"base_grip_target":                      float32(t.environment.baseAction[2]),
+		"residual_action_horizontal":            float32(t.environment.residualAction[0]),
+		"residual_action_vertical":              float32(t.environment.residualAction[1]),
+		"residual_action_gripper":               float32(t.environment.residualAction[2]),
+		"final_action_horizontal":               float32(t.environment.finalAction[0]),
+		"final_action_vertical":                 float32(t.environment.finalAction[1]),
+		"final_action_gripper":                  float32(t.environment.finalAction[2]),
+		"final_grip_target":                     float32(t.environment.finalAction[2]),
+		"applied_action_horizontal":             float32(t.environment.appliedAction[0]),
+		"applied_action_vertical":               float32(t.environment.appliedAction[1]),
+		"applied_action_gripper":                float32(t.environment.appliedAction[2]),
+		"dead_zone_removed_horizontal":          float32(boolToFloat(t.environment.deadZoneRemoved[0] || t.environment.filterDeadZoneRemoved[0])),
+		"dead_zone_removed_vertical":            float32(boolToFloat(t.environment.deadZoneRemoved[1] || t.environment.filterDeadZoneRemoved[1])),
+		"dead_zone_removed_gripper":             float32(boolToFloat(t.environment.deadZoneRemoved[2] || t.environment.filterDeadZoneRemoved[2])),
+		"control_timestep":                      float32(t.config.TimeStep),
+		"phase_numeric":                         float32(state.Phase),
+		"current_phase":                         float32(state.Phase),
+		"curriculum_stage_code":                 float32(t.environment.curriculumStageCode()),
+		"curriculum_contact_success_streak":     float32(t.environment.contactSuccessStreak),
+		"curriculum_contact_successes_required": float32(t.config.Curriculum.ContactSuccessesRequired),
+		"curriculum_grasp_hold_frames":          float32(t.environment.secureGripHoldFrames),
+		"curriculum_grasp_hold_frames_required": float32(t.environment.requiredGraspHoldFrames()),
+		"failure_reason_code":                   float32(t.environment.failureReasonCode()),
+		"episode_step":                          float32(state.EpisodeStep),
+		"energy":                                float32(state.Energy),
+		"energy_delta":                          float32(t.environment.lastEnergyDelta),
+		"energy_decay":                          float32(t.environment.lastEnergyDecay),
+		"energy_food_gain":                      float32(t.environment.lastEnergyFoodGain),
+		"energy_event_code":                     float32(t.environment.lastEnergyEvent),
+		"homeostasis_enabled":                   float32(boolToFloat(t.config.Homeostasis.Enabled)),
+		"carriage_x":                            float32(state.CarriageX),
+		"gripper_y":                             float32(state.GripperY),
+		"carriage_velocity_x":                   float32(state.CarriageVelocityX),
+		"gripper_velocity_y":                    float32(state.GripperVelocityY),
+		"gripper_to_object_error_x":             float32(state.ObjectX - state.CarriageX),
+		"gripper_to_object_error_y":             float32(t.environment.objectGripHeightFor(state) - state.GripperY),
+		"phase_id":                              float32(t.environment.rewardPhaseID(state)),
+		"dx_error":                              float32(math.Abs(state.CarriageX - state.ObjectX)),
+		"dy_error":                              float32(t.environment.graspGuideErrorFor(state)),
+		"hover_penalty_accumulated":             float32(t.environment.hoverPenaltyAccumulated),
+		"vertical_acceleration":                 float32(t.environment.verticalAcceleration),
+		"vertical_retraction_blocked":           float32(boolToFloat(t.environment.verticalRetractionBlocked)),
+		"required_grip_force":                   float32(t.environment.requiredForce()),
+		"object_mass":                           float32(state.ObjectMass),
+		"object_friction":                       float32(state.ObjectFriction),
+		"object_break_force":                    float32(state.ObjectBreakForce),
+		"invalid_contact_frames":                float32(t.environment.invalidContactFrames),
+		"contact_without_grip_frames":           float32(t.environment.contactWithoutGripFrames),
+		"object_was_lifted":                     float32(boolToFloat(t.environment.objectWasLifted)),
+		"lift_hold_frames":                      float32(t.environment.liftHoldFrames),
+		"lift_hold_frames_required":             float32(t.config.Curriculum.LiftHoldFrames),
+		"contact_bonus_awarded":                 float32(boolToFloat(state.ContactBonusAwarded)),
+		"slip_frames":                           float32(t.environment.slipFrames),
+		"slip_severity":                         float32(t.environment.slipSeverity()),
+		"slipping":                              float32(boolToFloat(state.Grip.Slipping)),
+		"boundary_hit":                          float32(boolToFloat(state.BoundaryHit)),
+		"coordinate_system_version":             CoordinateSystemVersion,
+		"gripper_closed":                        float32(boolToFloat(state.Grip.GripperClosed)),
+		"contact_detected":                      float32(boolToFloat(state.Grip.ContactDetected)),
+		"force_valid":                           float32(boolToFloat(state.Grip.ForceValid)),
+		"object_attached":                       float32(boolToFloat(state.Grip.ObjectAttached)),
+		"object_released":                       float32(boolToFloat(t.environment.wasEverGrasped && !state.Grip.ObjectAttached)),
+		"object_broken":                         float32(boolToFloat(state.ObjectBroken)),
+		"object_stable":                         float32(boolToFloat(t.environment.objectStable())),
+		"gripper_to_object_distance":            float32(gripperObjectDistance(state)),
+		"object_to_target_distance":             float32(targetDistance(state)),
+		"approach_reward":                       float32(breakdown.Approach),
+		"reward_descent_progress":               float32(breakdown.Descent),
+		"hover_penalty":                         float32(breakdown.Hover),
+		"smoothness_penalty":                    float32(breakdown.Smoothness),
+		"upward_retraction_penalty":             float32(breakdown.Retraction),
+		"contact_reward":                        float32(breakdown.Contact),
+		"grip_reward":                           float32(breakdown.Grip),
+		"lift_reward":                           float32(breakdown.Lift),
+		"lift_stall_penalty":                    float32(breakdown.LiftStall),
+		"delivery_reward":                       float32(breakdown.Delivery),
+		"success_reward":                        float32(breakdown.Success),
+		"homeostasis_reward":                    float32(breakdown.Homeostasis),
+		"detached_force_penalty":                float32(breakdown.DetachedForce),
+		"break_risk_penalty":                    float32(breakdown.BreakRisk),
+		"under_grip_penalty":                    float32(breakdown.UnderGrip),
+		"stability_penalty":                     float32(breakdown.Stability),
+		"penalty_reward":                        float32(breakdown.Penalty),
+		"total_step_reward":                     float32(breakdown.Total),
+	}
+	return framework.StepResult{
+		State: t.environment.observation(), Reward: float32(reward), Outcome: outcome,
+		Done: done, Info: info, AppliedAction: float32Action(t.environment.appliedAction),
+	}, nil
+}
+
+func actionValue(action framework.Action, index int) float32 {
+	if index >= len(action) {
+		return 0
+	}
+	return action[index]
+}
+
+func boolToFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }

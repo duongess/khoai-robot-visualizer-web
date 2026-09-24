@@ -10,6 +10,7 @@ import {
   Layers,
   Mountain,
 } from 'lucide-react';
+import { getTerrainHeightAt } from './coordinate-system';
 
 export const SceneEditor: React.FC = () => {
   const {
@@ -27,6 +28,7 @@ export const SceneEditor: React.FC = () => {
 
   const [activeTab, setActiveTab] = useState<'object' | 'gantry' | 'terrain'>('object');
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
+	const objectRestY = getTerrainHeightAt(draftConfig.object.position_x, draftConfig.terrain.points) + draftConfig.object.height / 2;
 
   if (runtimeStatus !== 'paused') {
     return (
@@ -138,22 +140,10 @@ export const SceneEditor: React.FC = () => {
               />
             </div>
 
-            {/* Object Position Y */}
-            <div>
-              <div className="flex justify-between text-slate-300 font-mono text-[11px] mb-1">
-                <span>Position Y: {draftConfig.object.position_y.toFixed(2)} m</span>
-                <span className="text-slate-500">[0.2 - 2.5 m]</span>
-              </div>
-              <input
-                type="range"
-                min="0.2"
-                max="2.5"
-                step="0.05"
-                value={draftConfig.object.position_y}
-                onChange={(e) => updateDraftObject({ position_y: parseFloat(e.target.value) })}
-                className="w-full accent-cyan-500 bg-slate-950 h-1.5 rounded-lg cursor-pointer"
-              />
-            </div>
+
+			<div className="rounded border border-slate-800 bg-slate-950/60 px-2.5 py-2 font-mono text-[11px] text-slate-400">
+				Rest height Y: <span className="text-slate-200">{objectRestY.toFixed(2)} m</span> · derived from terrain
+			</div>
 
             {/* Mass */}
             <div>

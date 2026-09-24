@@ -850,9 +850,16 @@ func slew(current, target, maximumDelta float64) float64 {
 
 func (e *Environment) applyGripControl(value float64) {
 	// action[2] is a signed force-rate request. Only the explicit release band
-	// opens the jaws; a small negative command means "back off a little", not
-	// "drop the object". This preserves the feedback-control problem for SAC.
+	// opens the jaws, and it is rejected while the gripper is still airborne
+	// above the release guide or before the explicit release phase.
+	// A small negative command means "back off a little", not "drop the object".
 	if value <= e.config.ReleaseActionThreshold {
+		if e.state.GripperY > e.targetReleaseGuideHeight()+e.config.ReleaseTolerance || math.Abs(e.state.ObjectX-e.state.TargetX) > e.config.TargetWidth/2+e.config.ReleaseTolerance || e.state.Phase != PhaseReleaseObject || !e.objectHorizontallyInsideTarget() {
+			e.state.GripperOpening = 0
+			e.state.GripForce = clamp(e.state.GripForce, 0, e.maximumSafeGripForce())
+			e.releaseCommanded = false
+			return
+		}
 		e.state.GripperOpening = 1
 		e.state.GripForce = 0
 		e.releaseCommanded = true

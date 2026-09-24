@@ -1555,6 +1555,31 @@ func TestFullPickAndPlaceRewardIncludesSecureHold(t *testing.T) {
 	}
 }
 
+func TestReleaseIsRejectedWhileGripperIsStillAirborne(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseLowerAtTarget
+	task.environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	task.environment.state.ObjectGrasped = true
+	task.environment.state.ObjectX = task.environment.state.TargetX
+	task.environment.state.ObjectY = task.environment.targetRestHeight()
+	task.environment.state.CarriageX = task.environment.state.TargetX
+	task.environment.state.GripperY = task.environment.targetReleaseGuideHeight() + config.ReleaseTolerance + 0.06
+	task.environment.releaseCommanded = false
+
+	task.environment.applyGripControl(-1)
+	if task.environment.state.GripperOpening != 0 {
+		t.Fatalf("release should be rejected while gripper is still airborne: opening=%v", task.environment.state.GripperOpening)
+	}
+	if task.environment.releaseCommanded {
+		t.Fatalf("release command should remain blocked until the gripper is at the release guide")
+	}
+}
+
 func TestReleaseOnlyCompletesAtTargetAfterExplicitReleaseCommand(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumFullPickAndPlace

@@ -52,10 +52,10 @@ export const PhysicsMetrics: React.FC = () => {
 	const forceActionMode = worker?.last_action.force_action_mode ?? 'hold';
 	const controlMode = worker?.control?.control_mode ?? 'pure_rl';
 	const residualEnabled = controlMode === 'residual';
-	const baseEnabled = controlMode === 'base_only' || residualEnabled;
 	const baseAction = worker?.control?.base_action;
 	const residualAction = worker?.control?.residual_action;
 	const finalAction = worker?.control?.final_action;
+	const appliedAction = worker?.control?.applied_action;
   const mass = obj?.mass ?? draftConfig.object.mass;
   const friction = obj?.friction ?? draftConfig.object.friction;
   const objectStatus = obj?.status ?? 'idle';
@@ -151,11 +151,9 @@ export const PhysicsMetrics: React.FC = () => {
         {/* Object & Gantry State Grid */}
         <div className="grid grid-cols-2 gap-2 font-mono text-[11px]">
 		  <div className="bg-slate-950/60 border border-slate-800/80 p-2 rounded">
-			<div className="text-[10px] text-slate-400">{baseEnabled ? 'Grip Target' : 'Force-Rate Command'}</div>
+			<div className="text-[10px] text-slate-400">Force-Rate Command</div>
 			<div className="text-sm font-bold text-violet-300 mt-0.5">
-			  {baseEnabled
-				? `${(finalAction?.grip_target ?? 0).toFixed(2)} N`
-				: `${forceRateNewtonPerSecond >= 0 ? '+' : ''}${forceRateNewtonPerSecond.toFixed(2)} N/s`}
+			  {`${forceRateNewtonPerSecond >= 0 ? '+' : ''}${forceRateNewtonPerSecond.toFixed(2)} N/s`}
 			</div>
 			<div className="text-[9px] uppercase text-slate-500 mt-0.5">
 			  {forceActionMode} ({forceRateCommand.toFixed(3)})
@@ -205,12 +203,12 @@ export const PhysicsMetrics: React.FC = () => {
 		  </div>
 
 		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
-			<div className="text-[10px] text-slate-400">{residualEnabled ? 'Residual Composition (base + residual → final)' : controlMode === 'base_only' ? 'Base Controller (base → final)' : 'Pure RL Action Pipeline (raw → filtered)'}</div>
+			<div className="text-[10px] text-slate-400">{residualEnabled ? 'Neural Composition (fly base + α × SAC residual → final)' : controlMode === 'base_only' ? 'Fly Connectome Base (base → applied)' : 'Pure SAC Residual (residual → applied)'}</div>
 			<div className="font-mono text-[10px] text-slate-200 mt-0.5">
 			  {residualEnabled
-				? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} + {(residualAction?.horizontal ?? 0).toFixed(3)} → {(finalAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} + {(residualAction?.vertical ?? 0).toFixed(3)} → {(finalAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.grip_target ?? 0).toFixed(2)} N + {(residualAction?.gripper ?? 0).toFixed(3)} → {(finalAction?.grip_target ?? 0).toFixed(2)} N</>
+				? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} + α·{(residualAction?.horizontal ?? 0).toFixed(3)} → {(finalAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} + α·{(residualAction?.vertical ?? 0).toFixed(3)} → {(finalAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.gripper ?? 0).toFixed(3)} + α·{(residualAction?.gripper ?? 0).toFixed(3)} → {(finalAction?.gripper ?? 0).toFixed(3)} · applied {(appliedAction?.gripper ?? 0).toFixed(3)}</>
 				: controlMode === 'base_only'
-					? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} → {(finalAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} → {(finalAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.grip_target ?? 0).toFixed(2)} N → {(finalAction?.grip_target ?? 0).toFixed(2)} N</>
+					? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.gripper ?? 0).toFixed(3)} · applied {(appliedAction?.horizontal ?? 0).toFixed(3)}, {(appliedAction?.vertical ?? 0).toFixed(3)}, {(appliedAction?.gripper ?? 0).toFixed(3)}</>
 				: <>x {(worker?.last_action.horizontal ?? 0).toFixed(3)} → {(worker?.last_action.filtered_horizontal ?? 0).toFixed(3)} · y {(worker?.last_action.vertical ?? 0).toFixed(3)} → {(worker?.last_action.filtered_vertical ?? 0).toFixed(3)} · grip {(worker?.last_action.gripper ?? 0).toFixed(3)} → {(worker?.last_action.filtered_gripper ?? 0).toFixed(3)}</>}
 			</div>
 		  </div>

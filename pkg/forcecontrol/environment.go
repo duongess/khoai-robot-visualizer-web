@@ -13,7 +13,7 @@ const ObservationDimension = 30
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 32
+const CoordinateSystemVersion = 33
 
 const (
 	observationGripperX = iota
@@ -173,12 +173,13 @@ type Environment struct {
 	state       State
 	ready       bool
 
-	gripBonusAwarded    bool
-	gripFoodAwarded     bool
-	liftFoodAwarded     bool
-	deliveryFoodAwarded bool
-	successFoodAwarded  bool
-	wasEverGrasped      bool
+	gripBonusAwarded       bool
+	secureGripBonusAwarded bool
+	gripFoodAwarded        bool
+	liftFoodAwarded        bool
+	deliveryFoodAwarded    bool
+	successFoodAwarded     bool
+	wasEverGrasped         bool
 	// objectWasLifted latches a verified carry-height event for this episode.
 	// It is deliberately distinct from a momentary attachment: after it becomes
 	// true, losing the object outside the target is a terminal mid-air drop.
@@ -190,14 +191,16 @@ type Environment struct {
 	failureReason                  string
 	lastReward                     RewardBreakdown
 	lastAppliedAction              [3]float64
-	// baseAction/finalAction are telemetry snapshots. Their first two entries
-	// are normalized velocity commands and their third is a force target in N.
-	// lastAppliedAction remains SAC's prior residual action for observation.
+	// The three action snapshots are emitted by the Python dual-loop actor.
+	// Every channel is normalized: X velocity, Y velocity, and grip force-rate.
+	// Go selects one vector by ControlMode, then applies only physical guards.
 	baseAction                [3]float64
 	residualAction            [3]float64
 	finalAction               [3]float64
+	appliedAction             [3]float64
 	alignmentGateAwarded      bool
 	hoverPenaltyAccumulated   float64
+	boundaryHitFrames         int
 	deadZoneRemoved           [3]bool
 	filterDeadZoneRemoved     [3]bool
 	filteredAction            [3]float64
@@ -279,6 +282,7 @@ func (e *Environment) reset() State {
 		e.state.GripperY = clamp(e.state.GripperY+e.symmetricJitter(e.config.Curriculum.Randomization.ContactStartHeightJitter), minimumY, maximumY)
 	}
 	e.gripBonusAwarded = false
+	e.secureGripBonusAwarded = false
 	e.state.ContactBonusAwarded = false
 	e.gripFoodAwarded = false
 	e.liftFoodAwarded = false
@@ -296,8 +300,10 @@ func (e *Environment) reset() State {
 	e.baseAction = [3]float64{}
 	e.residualAction = [3]float64{}
 	e.finalAction = [3]float64{}
+	e.appliedAction = [3]float64{}
 	e.alignmentGateAwarded = false
 	e.hoverPenaltyAccumulated = 0
+	e.boundaryHitFrames = 0
 	e.deadZoneRemoved = [3]bool{}
 	e.filterDeadZoneRemoved = [3]bool{}
 	e.filteredAction = [3]float64{}
@@ -550,10 +556,14 @@ func (e *Environment) approveCurriculumReview() error {
 }
 
 func (e *Environment) step(action []float32) (State, float64, Outcome, bool, error) {
+	return e.stepDecomposed(action, nil, nil)
+}
+
+func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State, float64, Outcome, bool, error) {
 	if !e.ready {
 		return State{}, 0, OutcomeRunning, false, errors.New("force-control environment must be reset before stepping")
 	}
-	values, err := e.validatedAction(action)
+	finalValues, err := e.actionVector(action)
 	if err != nil {
 		return State{}, 0, OutcomeRunning, false, err
 	}
@@ -561,30 +571,65 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		return e.state, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
 	}
 
+	baseValues := [3]float64{}
+	if len(flyBase) > 0 {
+		baseValues, err = e.actionVector(flyBase)
+		if err != nil {
+			return State{}, 0, OutcomeRunning, false, fmt.Errorf("fly base action: %w", err)
+		}
+	}
+	residualValues := finalValues
+	if len(residual) > 0 {
+		residualValues, err = e.actionVector(residual)
+		if err != nil {
+			return State{}, 0, OutcomeRunning, false, fmt.Errorf("SAC residual action: %w", err)
+		}
+	}
+	selected := finalValues
+	// A caller that supplies only the legacy/final action has no branches to
+	// select. Execute that action in every mode instead of treating a missing
+	// base or residual vector as an all-zero command.
+	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
+	if decompositionAvailable {
+		switch e.config.EffectiveControlMode() {
+		case ModeBaseOnly:
+			selected = baseValues
+		case ModePureRL:
+			selected = residualValues
+		case ModeResidual:
+			selected = finalValues
+		}
+	}
+	values, err := e.validatedAction(float32Action(selected))
+	if err != nil {
+		return State{}, 0, OutcomeRunning, false, err
+	}
 	filteredValues := e.filterAction(values)
 	previous := e.state
 	previousAction := e.lastAppliedAction
-	e.residualAction = filteredValues
+	e.baseAction = baseValues
+	e.residualAction = residualValues
+	e.finalAction = finalValues
+	e.appliedAction = filteredValues
 	e.contactBeforeMotion = e.contactDetected()
 	e.state.BoundaryHit = false
+	if e.boundaryHitFrames > 0 {
+		e.boundaryHitFrames--
+	}
 	e.verticalRetractionBlocked = false
 	mode := e.config.EffectiveControlMode()
-	switch mode {
-	case ModeBaseOnly, ModeResidual:
-		base := e.baseCommand()
-		command := base
-		if mode == ModeResidual {
-			command = e.composeResidualCommand(filteredValues)
-		}
-		e.baseAction = [3]float64{base.horizontal, base.vertical, base.gripTarget}
-		e.finalAction = [3]float64{command.horizontal, command.vertical, command.gripTarget}
-		e.applyHorizontalControl(command.horizontal)
-		e.applyVerticalControl(command.vertical)
-	case ModePureRL:
-		e.baseAction = [3]float64{}
-		e.finalAction = filteredValues
-		e.applyHorizontalControl(filteredValues[0])
-		e.applyVerticalControl(filteredValues[1])
+	// A force already at/above the material threshold is a physical fracture.
+	// The command clamp below prevents a new policy command from reaching this
+	// state; it must not retroactively repair an externally corrupted state.
+	if e.state.GripForce >= e.state.ObjectBreakForce {
+		e.state.ObjectBroken = true
+	}
+	e.applyHorizontalControl(filteredValues[0])
+	e.applyVerticalControl(filteredValues[1])
+	if e.state.BoundaryHit {
+		e.boundaryHitFrames++
+	} else {
+		e.boundaryHitFrames = 0
 	}
 	// Only upward motion requires extra carrying force. A lower-bound collision
 	// can stop a downward carriage abruptly; treating that braking impulse as a
@@ -595,15 +640,7 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		e.verticalAcceleration = math.Max(0, (e.state.GripperVelocityY-previous.GripperVelocityY)/e.config.TimeStep)
 	}
 	e.releaseCommanded = false
-	if mode == ModeBaseOnly || mode == ModeResidual {
-		command := e.baseCommand()
-		if mode == ModeResidual {
-			command = e.composeResidualCommand(filteredValues)
-		}
-		e.applyGripTarget(command.gripTarget, command.release)
-	} else {
-		e.applyGripControl(filteredValues[2])
-	}
+	e.applyGripControl(filteredValues[2])
 	e.lastAppliedAction = filteredValues
 	e.updateGripState()
 	e.updateContactWithoutGripCounter()
@@ -630,7 +667,11 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		e.resetContactSuccessStreakOnFailure()
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
 		e.updateHomeostasis(terminalReason)
-		e.lastReward = e.rewardWithActions(previous, filteredValues, previousAction)
+		rewardAction := filteredValues
+		if mode == ModeResidual {
+			rewardAction = residualValues
+		}
+		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
 		e.lastReward.Total += e.failurePenalty(terminalReason)
 		return e.state, e.lastReward.Total, OutcomeFailure, true, nil
@@ -638,7 +679,11 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 	e.updatePhase(previous)
 	e.updateHomeostasis("")
 	if e.state.Phase == PhaseSuccess {
-		e.lastReward = e.rewardWithActions(previous, filteredValues, previousAction)
+		rewardAction := filteredValues
+		if mode == ModeResidual {
+			rewardAction = residualValues
+		}
+		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		if !e.successRewardAwarded {
 			switch e.currentCurriculumStage() {
 			case CurriculumAlignAndContact:
@@ -672,8 +717,30 @@ func (e *Environment) step(action []float32) (State, float64, Outcome, bool, err
 		}
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
-	e.lastReward = e.rewardWithActions(previous, filteredValues, previousAction)
+	rewardAction := filteredValues
+	if mode == ModeResidual {
+		rewardAction = residualValues
+	}
+	e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
+}
+
+func (e *Environment) actionVector(action []float32) ([3]float64, error) {
+	if len(action) != 3 {
+		return [3]float64{}, errors.New("force-control action must contain exactly three values")
+	}
+	values := [3]float64{}
+	for index, value := range action {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return [3]float64{}, errors.New("force-control action must contain only finite values")
+		}
+		values[index] = clamp(float64(value), -1, 1)
+	}
+	return values, nil
+}
+
+func float32Action(values [3]float64) []float32 {
+	return []float32{float32(values[0]), float32(values[1]), float32(values[2])}
 }
 
 // resetContactSuccessStreakOnFailure makes the first automatic lesson require
@@ -749,14 +816,9 @@ func (e *Environment) filterAction(raw [3]float64) [3]float64 {
 }
 
 func (e *Environment) applyHorizontalControl(value float64) {
-	// Once horizontally aligned, lateral motion is no longer useful for the
-	// lowering/grasp phases.  Hold the carriage inside a hysteresis band so
-	// noisy policy sign changes cannot make it oscillate over the object.
-	if !e.state.Grip.ObjectAttached &&
-		(e.state.Phase == PhaseLowerToObject || e.state.Phase == PhaseGripObject) &&
-		math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.Reward.AlignmentEpsilonX {
-		value = 0
-	}
+	// During PhaseLowerToObject, a zero or tiny lateral command is still valid:
+	// the policy is allowed to keep trimming horizontal error while descending,
+	// and only an actual workspace boundary should clamp it to zero.
 	targetVelocity := value * e.config.MaxHorizontalSpeed
 	e.state.CarriageVelocityX = slew(e.state.CarriageVelocityX, targetVelocity, e.config.MaxHorizontalAcceleration*e.config.TimeStep)
 	next := e.state.CarriageX + e.state.CarriageVelocityX*e.config.TimeStep
@@ -764,29 +826,12 @@ func (e *Environment) applyHorizontalControl(value float64) {
 	e.state.CarriageX = clamp(next, safeMinX, safeMaxX)
 	if e.state.CarriageX != next {
 		e.state.CarriageVelocityX = 0
+		e.filteredAction[0] = 0
 		e.state.BoundaryHit = true
 	}
 }
 
 func (e *Environment) applyVerticalControl(value float64) {
-	// In the aligned LowerToObject phase, retracting is never a task-valid
-	// command: contact is below the current gripper guide. Reject it in the
-	// backend (not only the renderer) and slew any existing upward velocity to
-	// zero. The actor still receives an explicit retraction/jerk penalty below.
-	if !e.state.Grip.ObjectAttached && e.state.Phase == PhaseLowerToObject &&
-		!e.state.Grip.ContactDetected &&
-		math.Abs(e.state.CarriageX-e.state.ObjectX) <= e.config.Reward.AlignmentEpsilonX &&
-		e.state.GripperY > e.objectGripHeight()+e.config.Reward.GraspZoneToleranceY && value > 0 {
-		value = 0
-		e.verticalRetractionBlocked = true
-	}
-	// Once the end-effector is in the grasp slice, hold the vertical pose while
-	// the actor changes force. This removes the common hover/lower oscillation:
-	// tiny alternating Y actions cannot repeatedly leave and re-enter contact.
-	if !e.state.Grip.ObjectAttached && e.state.Phase == PhaseGripObject &&
-		math.Abs(e.state.GripperY-e.objectGripHeight()) <= e.config.Reward.GraspZoneToleranceY {
-		value = 0
-	}
 	targetVelocity := value * e.config.MaxVerticalSpeed
 	e.state.GripperVelocityY = slew(e.state.GripperVelocityY, targetVelocity, e.config.MaxVerticalAcceleration*e.config.TimeStep)
 	next := e.state.GripperY + e.state.GripperVelocityY*e.config.TimeStep
@@ -794,6 +839,7 @@ func (e *Environment) applyVerticalControl(value float64) {
 	e.state.GripperY = clamp(next, safeMinY, safeMaxY)
 	if e.state.GripperY != next {
 		e.state.GripperVelocityY = 0
+		e.filteredAction[1] = 0
 		e.state.BoundaryHit = true
 	}
 }
@@ -816,24 +862,9 @@ func (e *Environment) applyGripControl(value float64) {
 	// No target or hold force is selected here. The actor continuously controls
 	// the signed actuator rate; this layer only enforces hardware/material caps.
 	deltaForce := value * e.config.MaxGripForceRate * e.config.TimeStep
-	e.state.GripForce = clamp(e.state.GripForce+deltaForce, 0, math.Min(e.config.MaxGripForce, e.state.ObjectBreakForce))
-}
-
-// applyGripTarget is the low-level force actuator used only by residual mode.
-// The deterministic base supplies the nominal setpoint and SAC supplies the
-// bounded offset. Slewing towards that composed target preserves the fixed
-// hardware force-rate limit rather than teleporting the jaws to a new force.
-func (e *Environment) applyGripTarget(target float64, release bool) {
-	if release {
-		e.state.GripperOpening = 1
-		e.state.GripForce = 0
-		e.releaseCommanded = true
-		return
-	}
-	e.state.GripperOpening = 0
-	target = clamp(target, 0, e.maximumResidualGripForce())
-	maximumDelta := e.config.MaxGripForceRate * e.config.TimeStep
-	e.state.GripForce = slew(e.state.GripForce, target, maximumDelta)
+	// The safety layer does not choose a force setpoint. It only enforces the
+	// absolute hardware/material envelope requested by the task specification.
+	e.state.GripForce = clamp(e.state.GripForce+deltaForce, 0, e.maximumSafeGripForce())
 }
 
 func (e *Environment) updateGripState() {
@@ -959,6 +990,8 @@ func (e *Environment) detectFailure(previous State) string {
 	switch {
 	case e.state.ObjectBroken:
 		return "object_break"
+	case e.boundaryHitFrames >= 5:
+		return "boundary_collision"
 	case e.objectOutOfBounds():
 		return "workspace_violation"
 	case e.objectWasLifted && !e.state.Grip.ObjectAttached && !e.objectInsideTarget():
@@ -1062,7 +1095,7 @@ func (e *Environment) updateStandardPhase(previous State) {
 	xError := math.Abs(e.state.CarriageX - e.state.ObjectX)
 	switch previous.Phase {
 	case PhaseApproachObject:
-		if xError <= e.config.AlignmentEnterTolerance && math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
+		if xError <= e.config.GraspHorizontalTolerance && math.Abs(e.state.CarriageVelocityX) <= e.config.StableVelocityThreshold {
 			e.state.Phase = PhaseLowerToObject
 		}
 	case PhaseLowerToObject:
@@ -1106,9 +1139,6 @@ func (e *Environment) reward(previous State, horizontalAction, gripRateAction, p
 }
 
 func (e *Environment) rewardWithActions(previous State, action, previousAction [3]float64) RewardBreakdown {
-	if e.config.EffectiveControlMode() == ModeResidual {
-		return e.residualReward(previous, action)
-	}
 	breakdown := RewardBreakdown{Homeostasis: e.lastEnergyDelta}
 	// Time cost is always present. Homeostasis is an additional motivation
 	// signal, not a replacement that can make hovering cost-free.
@@ -1136,11 +1166,15 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 			// across the full rail: toward is positive, retreat is negative.
 			deltaDX := previousDX - currentDX
 			breakdown.Approach += e.config.Reward.ApproachProgressScale * deltaDX
-			// Penalize only the downward displacement in this transition. Using
-			// s_t and s_(t+1) preserves the Markov property even with randomized
-			// episode starts.
+			// Penalize only real lowering toward the grasp guide/clearance band,
+			// not normal travel near the ceiling. The latter would train a
+			// self-reinforcing “hover at the top rail” policy instead of an
+			// approach-to-contact motion.
+			safeTravelClearance := e.objectGripHeightFor(e.state) + e.config.GripperClearance + e.config.Reward.GraspZoneToleranceY
 			prematureDescent := math.Max(0, previous.GripperY-e.state.GripperY)
-			breakdown.Penalty -= e.config.Reward.PrematureLoweringPenaltyScale * prematureDescent
+			if previous.GripperY > e.state.GripperY && e.state.GripperY < safeTravelClearance {
+				breakdown.Penalty -= e.config.Reward.PrematureLoweringPenaltyScale * prematureDescent
+			}
 		case currentDY > e.config.Reward.GraspZoneToleranceY:
 			// Phase 2: the one-time event bit is exposed in the observation, so
 			// this augmented state remains Markovian.
@@ -1158,13 +1192,20 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 			// whether a real grasp was made.
 		}
 	}
-	breakdown.Smoothness = -e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(action) -
-		e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(action, previousAction)
-	jerkY := action[1] - previousAction[1]
+	regularizedAction, regularizedPrevious := action, previousAction
+	if e.state.Grip.ContactDetected && action[2] > 0 {
+		// Positive contact force is the residual loop's means of probing friction
+		// and extinguishing slip. Do not make that exploration pay generic energy
+		// or jerk costs; the near-break barrier still limits unsafe force.
+		regularizedAction[2], regularizedPrevious[2] = 0, 0
+	}
+	breakdown.Smoothness = -e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(regularizedAction) -
+		e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(regularizedAction, regularizedPrevious)
+	jerkY := regularizedAction[1] - regularizedPrevious[1]
 	breakdown.Smoothness -= e.config.Reward.JerkYPenaltyScale * jerkY * jerkY
 	for _, index := range [...]int{1, 2} { // vertical and force-rate actions
-		if action[index]*previousAction[index] < 0 {
-			breakdown.Smoothness -= e.config.Reward.ActionFlipPenalty * math.Abs(action[index]-previousAction[index])
+		if regularizedAction[index]*regularizedPrevious[index] < 0 {
+			breakdown.Smoothness -= e.config.Reward.ActionFlipPenalty * math.Abs(regularizedAction[index]-regularizedPrevious[index])
 		}
 	}
 	breakdown.Penalty += breakdown.Smoothness
@@ -1197,6 +1238,12 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	if stage != CurriculumAlignAndContact && !previous.Grip.ObjectAttached && attached && !e.gripBonusAwarded {
 		breakdown.Grip = e.config.Reward.SuccessfulGripReward
 		e.gripBonusAwarded = true
+	}
+	if !previous.Grip.ForceValid && e.state.Grip.ForceValid && attached && !e.secureGripBonusAwarded {
+		// This transition is observable without exposing mass/friction or the
+		// analytic required force: tactile slip disappeared while attachment held.
+		breakdown.Grip += e.config.Residual.SecureGraspBonus
+		e.secureGripBonusAwarded = true
 	}
 	if previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
 		// This intentionally remains smaller than TimePenalty. It makes keeping
@@ -1234,10 +1281,14 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		breakdown.Delivery = e.config.Reward.TransportProgressScale * deliveryDelta
 	}
 	if previous.Grip.ObjectAttached && attached && previous.Phase != PhaseReleaseObject {
-		breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(action[2]-previousAction[2])
-		breakdown.Penalty -= e.config.Reward.GripForceChangePenaltyScale * math.Abs(e.state.GripForce-previous.GripForce)
+		if !(e.state.Grip.ContactDetected && action[2] > 0) {
+			breakdown.Penalty -= e.config.Reward.GripActionChangePenalty * math.Abs(action[2]-previousAction[2])
+			breakdown.Penalty -= e.config.Reward.GripForceChangePenaltyScale * math.Abs(e.state.GripForce-previous.GripForce)
+		}
 		if e.state.Grip.Slipping {
-			breakdown.Penalty += e.config.Reward.SlipPenalty
+			// A continuous sensor-derived cost gives SAC a gradient toward more
+			// force without revealing mass, friction, or requiredGripForce.
+			breakdown.Penalty -= e.config.Residual.SlipSeverityPenaltyScale * e.slipSeverity()
 		} else if e.state.Grip.ForceValid {
 			// A per-frame stability payment is useful only in the isolated
 			// grasp lesson. Paying it during full pick-and-place creates a
@@ -1304,37 +1355,14 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	if e.state.BoundaryHit {
 		breakdown.Penalty += e.config.Reward.BoundaryCollisionPenalty
 	}
-	breakdown.Total = breakdown.Approach + breakdown.Contact + breakdown.Grip + breakdown.Descent + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
-	return breakdown
-}
-
-// residualReward intentionally scores only what SAC owns in residual mode:
-// corrective grip during measured slip, stable attachment, and avoiding
-// residual commands that amplify transport motion. The FSM owns macro
-// approach/lower/lift/transport; scoring those same milestones densely here
-// would reintroduce cross-phase reward interference.
-func (e *Environment) residualReward(previous State, residual [3]float64) RewardBreakdown {
-	breakdown := RewardBreakdown{Penalty: e.config.Reward.TimePenalty}
-	if e.state.Grip.Slipping {
-		// This is deliberately continuous. A higher chosen force reduces the
-		// observed severity and immediately improves value before detachment.
-		breakdown.Penalty -= e.config.Residual.SlipSeverityPenaltyScale * e.slipSeverity()
-	}
-	if !previous.Grip.ForceValid && e.state.Grip.ForceValid && e.state.Grip.ObjectAttached {
-		breakdown.Grip += e.config.Residual.SecureGraspBonus
-	}
-	if e.state.Grip.ForceValid && e.state.Grip.ObjectAttached && !e.state.Grip.Slipping {
-		breakdown.Grip += e.config.Residual.HoldStabilityReward
-	}
-	if e.state.Phase == PhaseMoveToTarget && e.state.Grip.ObjectAttached {
-		// Charge only corrections that increase existing carriage motion. A
-		// correction opposing velocity is a legitimate damping action, not a
-		// source of synthetic positive reward.
-		amplifyingMotion := math.Max(0, e.state.CarriageVelocityX*residual[0])
+	if e.config.EffectiveControlMode() == ModeResidual && e.state.Phase == PhaseMoveToTarget && attached {
+		// Penalize only residual corrections that amplify existing transport
+		// velocity. Corrections opposing motion are legitimate inertia damping.
+		amplifyingMotion := math.Max(0, e.state.CarriageVelocityX*action[0])
 		breakdown.Stability = -e.config.Residual.DampingPenaltyScale * amplifyingMotion
 		breakdown.Penalty += breakdown.Stability
 	}
-	breakdown.Total = breakdown.Grip + breakdown.Penalty
+	breakdown.Total = breakdown.Approach + breakdown.Contact + breakdown.Grip + breakdown.Descent + breakdown.Lift + breakdown.Delivery + breakdown.Success + breakdown.Homeostasis + breakdown.Penalty
 	return breakdown
 }
 

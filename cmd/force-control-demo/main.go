@@ -74,6 +74,10 @@ func main() {
 	}
 	runtimeConfig := framework.DefaultRuntimeConfig()
 	runtimeConfig.WorkerCount = 2
+	// Dual-loop modes require the learner's fly-base decomposition from the
+	// first step. Exploration still comes from the stochastic SAC residual head;
+	// framework-generated random actions have no corresponding fly-base vector.
+	runtimeConfig.RandomActionWarmupTransitions = 0
 
 	if err := runtime.Configure(runtimeConfig, learner); err != nil {
 		log.Fatalf("configure runtime: %v", err)

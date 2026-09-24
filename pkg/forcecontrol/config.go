@@ -46,11 +46,9 @@ type HomeostasisConfig struct {
 	BreakEnergyLoss               float64
 }
 
-// ResidualControlConfig defines the deterministic task controller and the
-// bounded correction authority granted to SAC.  The base controller owns
-// nominal motion; the policy can only compensate for model error, slip, and
-// damping.  This makes the action contract explicit instead of hiding a
-// scripted controller behind a normal SAC action.
+// ResidualControlConfig retains safety/reward parameters plus the legacy
+// reference-controller settings used only by offline tests. Runtime base and
+// residual actions are produced by the Python dual-loop actor.
 type ResidualControlConfig struct {
 	Enabled bool
 	// ApproachGain and TransportGain are proportional velocity gains in 1/s.
@@ -401,12 +399,12 @@ type Config struct {
 	MaxEpisodeSteps                 int
 	// ControlMode is intentionally separate from Residual settings. An empty
 	// value retains the legacy Residual.Enabled behaviour for embedders.
-	ControlMode                     ControlMode
-	Residual                        ResidualControlConfig
-	Homeostasis                     HomeostasisConfig
-	Curriculum                      CurriculumConfig
-	Reward                          RewardConfig
-	Terrain                         []TerrainPoint
+	ControlMode ControlMode
+	Residual    ResidualControlConfig
+	Homeostasis HomeostasisConfig
+	Curriculum  CurriculumConfig
+	Reward      RewardConfig
+	Terrain     []TerrainPoint
 }
 
 // EffectiveControlMode preserves the pre-control-mode configuration contract:
@@ -566,7 +564,10 @@ func DefaultConfig() Config {
 			ActionMagnitudePenaltyScale:   0.002,
 			ActionDeltaPenaltyScale:       0.01,
 			ActionFlipPenalty:             0.15,
-			JerkYPenaltyScale:             0.15,
+			// Keep jerk regularization below one step of genuine descent
+			// progress. Retraction has its own much stronger phase penalty, so
+			// an initial decisive downward command must beat lateral dithering.
+			JerkYPenaltyScale: 0.05,
 			// Match vertical descent shaping so every metre of genuine approach
 			// earns an immediate, signed transition reward.
 			ApproachProgressScale:     3.0,

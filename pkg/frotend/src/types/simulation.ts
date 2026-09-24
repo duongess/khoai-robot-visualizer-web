@@ -231,7 +231,7 @@ export interface WorkerState {
 		dead_zone_removed_gripper?: boolean;
     force_rate_command?: number;
     force_rate_newtons_per_second?: number;
-    force_action_mode?: 'increase' | 'hold' | 'decrease' | 'release' | 'residual setpoint';
+    force_action_mode?: 'increase' | 'hold' | 'decrease' | 'release';
   };
   last_reward: number;
   cumulative_reward?: number;
@@ -257,9 +257,10 @@ export interface WorkerState {
 		control_mode?: ControlMode;
 		base_enabled?: boolean;
 		residual_enabled?: boolean;
-		base_action?: { horizontal: number; vertical: number; grip_target: number };
+		base_action?: { horizontal: number; vertical: number; gripper: number };
 		residual_action?: { horizontal: number; vertical: number; gripper: number };
-		final_action?: { horizontal: number; vertical: number; grip_target: number };
+		final_action?: { horizontal: number; vertical: number; gripper: number };
+		applied_action?: { horizontal: number; vertical: number; gripper: number };
 		boundary_hit?: boolean;
 		error_x: number;
 		error_y: number;

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,11 +32,8 @@ func (apiTestLearner) PredictBatch(_ context.Context, states []framework.State, 
 func (apiTestLearner) TrainBatch(context.Context, []framework.Transition) (framework.TrainingResult, error) {
 	return framework.TrainingResult{}, nil
 }
-func (apiTestLearner) SaveCheckpoint(_ context.Context, modelName string) (framework.CheckpointResult, error) {
-	if modelName == "" {
-		return framework.CheckpointResult{}, errors.New("a model name is required")
-	}
-	return framework.CheckpointResult{ModelName: modelName, PolicyVersion: 7, TrainingStep: 8}, nil
+func (apiTestLearner) SaveCheckpoint(_ context.Context) (framework.CheckpointResult, error) {
+	return framework.CheckpointResult{ModelName: "grasp-v1", PolicyVersion: 7, TrainingStep: 8}, nil
 }
 func (apiTestLearner) Close() error { return nil }
 
@@ -136,6 +132,15 @@ func TestAPIServerAcceptsCanvasObjectIDAndLegacyTargetY(t *testing.T) {
 	}
 	server, err := NewAPIServer(runtime, config)
 	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	if err := runtime.Pause(); err != nil {
 		t.Fatal(err)
 	}
 	payload := map[string]any{

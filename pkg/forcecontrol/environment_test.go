@@ -140,6 +140,49 @@ func TestKnownActionsMoveGripperAndAreClamped(t *testing.T) {
 	}
 }
 
+func TestPrematureDescentPenaltyOnlyActivatesBelowTravelClearance(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	env := newEnvironment(101, config)
+	env.reset()
+	previous := env.state
+	previous.CarriageX = env.state.ObjectX - 0.5
+	previous.GripperY = 2.8
+	env.state = previous
+	env.state.GripperY = 2.6
+	result := env.rewardWithActions(previous, [3]float64{0, 0, 0}, [3]float64{})
+	if result.Penalty < config.Reward.TimePenalty-1e-9 {
+		t.Fatalf("travel-height descent should not be punished: %#v", result)
+	}
+
+	previous.GripperY = 0.8
+	env.state.GripperY = 0.6
+	lowResult := env.rewardWithActions(previous, [3]float64{0, 0, 0}, [3]float64{})
+	if lowResult.Penalty >= result.Penalty {
+		t.Fatalf("below-clearance descent should be penalized more strongly: high=%#v low=%#v", result, lowResult)
+	}
+}
+
+func TestPersistentBoundaryHitTriggersFailureAfterFiveFrames(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	env := newEnvironment(102, config)
+	env.reset()
+	env.state.BoundaryHit = true
+	env.state.Phase = PhaseApproachObject
+	for step := 0; step < 5; step++ {
+		env.boundaryHitFrames = step + 1
+		if step < 4 {
+			if env.detectFailure(State{}) != "" {
+				t.Fatalf("boundary failure triggered too early at step=%d", step)
+			}
+		}
+	}
+	if env.detectFailure(State{}) == "" {
+		t.Fatalf("persistent boundary hit should eventually fail")
+	}
+}
+
 func TestApproachProgressRewardsTowardMovement(t *testing.T) {
 	config := DefaultConfig()
 	config.InitialCarriageX = 0.5
@@ -238,36 +281,41 @@ func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
 	}
 }
 
-func TestResidualBaseControllerCompletesNominalPickAndPlaceAtZeroResidual(t *testing.T) {
-	config := DefaultConfig()
-	config.Residual.Enabled = true
-	config.Homeostasis.Enabled = false
-	config.Curriculum.Stage = CurriculumFullPickAndPlace
-	config.Curriculum.Randomization.Enabled = false
-	task := NewTask(71, config)
-	if _, err := task.Reset(); err != nil {
-		t.Fatal(err)
+func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *testing.T) {
+	tests := []struct {
+		mode ControlMode
+		want float32
+	}{
+		{ModeBaseOnly, -0.8},
+		{ModeResidual, 0.4},
+		{ModePureRL, 0.7},
 	}
-	var result framework.StepResult
-	var err error
-	sawComposedGripTarget := false
-	for step := 0; step < config.MaxEpisodeSteps; step++ {
-		result, err = task.Step(framework.Action{0, 0, 0})
+	for _, test := range tests {
+		config := DefaultConfig()
+		config.ControlMode = test.mode
+		config.Homeostasis.Enabled = false
+		task := NewTask(71, config)
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		initialX := task.environment.state.CarriageX
+		result, err := task.StepDecomposed(
+			framework.Action{0.4, 0, 0},
+			framework.Action{-0.8, 0, 0},
+			framework.Action{0.7, 0, 0},
+		)
 		if err != nil {
-			t.Fatalf("zero-residual step %d: %v", step, err)
+			t.Fatalf("mode %s: %v", test.mode, err)
 		}
-		if result.Info["base_grip_target"] > 0 && result.Info["final_grip_target"] > 0 {
-			sawComposedGripTarget = true
+		if math.Abs(float64(result.AppliedAction[0])-float64(test.want)*config.ActionSmoothingAlpha) > 1e-5 {
+			t.Fatalf("mode %s applied %v; branch selection is wrong", test.mode, result.AppliedAction)
 		}
-		if result.Done {
-			break
+		if test.want != 0 && task.environment.state.CarriageX == initialX {
+			t.Fatalf("mode %s did not apply selected neural command", test.mode)
 		}
-	}
-	if !result.Done || result.Outcome != OutcomeSuccess {
-		t.Fatalf("zero residual did not complete nominal pick-and-place: result=%#v state=%#v", result, task.environment.state)
-	}
-	if result.Info["residual_control_enabled"] != 1 || !sawComposedGripTarget {
-		t.Fatalf("residual telemetry did not expose composed commands: %#v", result.Info)
+		if result.Info["base_action_horizontal"] != -0.8 || result.Info["residual_action_horizontal"] != 0.7 || result.Info["final_action_horizontal"] != 0.4 {
+			t.Fatalf("mode %s lost dual-loop decomposition: %#v", test.mode, result.Info)
+		}
 	}
 }
 
@@ -281,22 +329,43 @@ func TestResidualGripCorrectionIsBoundedAndSlipRewardIsContinuous(t *testing.T) 
 	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ObjectAttached: true, Slipping: true}
 	environment.state.GripForce = environment.requiredForce() * 0.60
 	previous := environment.state
-
-	command := environment.composeResidualCommand([3]float64{0, 0, 1})
-	if command.gripTarget <= environment.safeBaseGripForce() || command.gripTarget > environment.state.ObjectBreakForce-config.Residual.ForceSafetyMargin+1e-9 {
-		t.Fatalf("residual grip target escaped its bounded safe band: command=%#v base=%v", command, environment.safeBaseGripForce())
-	}
 	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
 	if reward.Penalty >= config.Reward.TimePenalty || reward.Grip != 0 {
 		t.Fatalf("slip did not receive a continuous residual penalty: %#v", reward)
+	}
+
+	for step := 0; step < 100; step++ {
+		environment.applyGripControl(1)
+	}
+	maximumSafeForce := environment.state.ObjectBreakForce - config.Residual.ForceSafetyMargin
+	if environment.state.GripForce != maximumSafeForce {
+		t.Fatalf("model grip command escaped material safety envelope: got=%v want=%v", environment.state.GripForce, maximumSafeForce)
 	}
 
 	previous.Grip.ForceValid = false
 	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
 	environment.state.GripForce = environment.requiredForce()
 	secured := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	if secured.Grip < config.Residual.SecureGraspBonus+config.Residual.HoldStabilityReward {
-		t.Fatalf("secure-grasp transition did not earn residual bonus and hold reward: %#v", secured)
+	if secured.Grip < config.Residual.SecureGraspBonus {
+		t.Fatalf("secure-grasp transition did not earn its tactile breakthrough bonus: %#v", secured)
+	}
+}
+
+func TestResidualModeStillTrainsFlyBaseWithSpatialProgress(t *testing.T) {
+	config := DefaultConfig()
+	config.ControlMode = ModeResidual
+	config.Homeostasis.Enabled = false
+	environment := newEnvironment(73, config)
+	environment.state = State{
+		CarriageX: 1, ObjectX: 2, GripperY: 2, ObjectY: 0.4,
+		ObjectMass: config.ObjectMass, ObjectFriction: config.ObjectFriction,
+		ObjectBreakForce: config.ObjectBreakForce, Phase: PhaseApproachObject,
+	}
+	previous := environment.state
+	environment.state.CarriageX = 1.1
+	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if reward.Approach <= 0 || reward.Total <= config.Reward.TimePenalty {
+		t.Fatalf("residual mode starved fly-base spatial learning: %#v", reward)
 	}
 }
 
@@ -535,7 +604,7 @@ func TestGripBonusCannotBePumpedAfterAReleaseAndRegrasp(t *testing.T) {
 	environment.state.ContactBonusAwarded = true
 
 	first := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	if got, want := first.Grip, config.Reward.SuccessfulGripReward; math.Abs(got-want) > 1e-9 || !environment.gripBonusAwarded {
+	if got, want := first.Grip, config.Reward.SuccessfulGripReward+config.Residual.SecureGraspBonus; math.Abs(got-want) > 1e-9 || !environment.gripBonusAwarded || !environment.secureGripBonusAwarded {
 		t.Fatalf("first secure attachment reward=%v, want %v; latch=%v", got, want, environment.gripBonusAwarded)
 	}
 
@@ -641,7 +710,7 @@ func TestFirstNegativeVerticalActionDescendsInWorldCoordinates(t *testing.T) {
 	if got, want := task.environment.state.GripperY, initialY-0.03; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("first negative vertical position = %v, want %v", got, want)
 	}
-	if result.Info["raw_action_vertical"] != -1 || math.Abs(float64(result.Info["filtered_action_vertical"])-(-0.3)) > 1e-6 || result.Info["phase_numeric"] != float32(PhaseLowerToObject) {
+	if result.Info["raw_action_vertical"] != -1 || math.Abs(float64(result.Info["filtered_action_vertical"])-(-0.3)) > 1e-6 || result.Info["phase_numeric"] != float32(PhaseApproachObject) {
 		t.Fatalf("vertical action or phase telemetry is incorrect: %#v", result.Info)
 	}
 	for step := 0; step < 20; step++ {
@@ -1121,7 +1190,7 @@ func TestLoweringRetractionAndVerticalJerkAreMoreCostlyThanDirectDescent(t *test
 	}
 }
 
-func TestAlignedLoweringRejectsUpwardCommandAndMakesRetractionStrictlyCostly(t *testing.T) {
+func TestAlignedLoweringAllowsPolicyAuthorityButMakesRetractionStrictlyCostly(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	environment := newEnvironment(43, config)
@@ -1137,8 +1206,8 @@ func TestAlignedLoweringRejectsUpwardCommandAndMakesRetractionStrictlyCostly(t *
 	}
 	initialY := environment.state.GripperY
 	environment.applyVerticalControl(1)
-	if !environment.verticalRetractionBlocked || environment.state.GripperY > initialY || environment.state.GripperVelocityY > 0 {
-		t.Fatalf("aligned lower phase accepted retraction: blocked=%v state=%#v", environment.verticalRetractionBlocked, environment.state)
+	if environment.verticalRetractionBlocked || environment.state.GripperY <= initialY || environment.state.GripperVelocityY <= 0 {
+		t.Fatalf("environment overrode the policy's upward command: blocked=%v state=%#v", environment.verticalRetractionBlocked, environment.state)
 	}
 
 	previous := environment.state
@@ -1327,7 +1396,7 @@ func TestLoweringPhaseRewardsDescentAndPenalizesHorizontalDithering(t *testing.T
 		t.Fatal(err)
 	}
 	hover.environment.state.Phase = PhaseLowerToObject
-	hoverResult, err := hover.Step(framework.Action{0.2, 0, 0})
+	hoverResult, err := hover.Step(framework.Action{0.2, 0, -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1340,11 +1409,11 @@ func TestLoweringPhaseRewardsDescentAndPenalizesHorizontalDithering(t *testing.T
 		t.Fatal(err)
 	}
 	descend.environment.state.Phase = PhaseLowerToObject
-	descendResult, err := descend.Step(framework.Action{0, -1, 0})
+	descendResult, err := descend.Step(framework.Action{0, -1, -1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if descendResult.Info["approach_reward"] <= 0 || descendResult.Reward <= hoverResult.Reward {
+	if descendResult.Info["reward_descent_progress"] <= 0 || descendResult.Reward <= hoverResult.Reward {
 		t.Fatalf("descent must be preferred to horizontal dithering: descend=%#v hover=%#v", descendResult.Info, hoverResult.Info)
 	}
 }
@@ -1723,8 +1792,8 @@ func TestAutomaticCurriculumAdvancesOnlyAfterVerifiedStageSuccess(t *testing.T) 
 	if got := task.environment.currentCurriculumStage(); got != CurriculumGrasp {
 		t.Fatalf("automatic curriculum did not advance after success: got %q, want %q", got, CurriculumGrasp)
 	}
-	if task.environment.state.Phase != PhaseApproachObject || task.environment.state.Grip.ObjectAttached {
-		t.Fatalf("grasp lesson must reset to a policy-controlled detached approach: %#v", task.environment.state)
+	if task.environment.state.Phase != PhaseGripObject || !task.environment.state.Grip.ContactDetected || task.environment.state.Grip.ObjectAttached {
+		t.Fatalf("reverse grasp lesson must reset in contact but detached: %#v", task.environment.state)
 	}
 }
 
@@ -2205,7 +2274,9 @@ func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
 		action := framework.Action{0, 0, 0}
 		switch phase {
 		case PhaseApproachObject:
-			action = framework.Action{0, 0, -1}
+			deltaX := task.environment.state.ObjectX - task.environment.state.CarriageX
+			horizontal := clamp(2*deltaX-0.8*task.environment.state.CarriageVelocityX, -1, 1)
+			action = framework.Action{float32(horizontal), 0, -1}
 		case PhaseLowerToObject:
 			action = framework.Action{0, -1, -1}
 		case PhaseGripObject:
@@ -2213,7 +2284,9 @@ func advanceToPhase(t *testing.T, task *Task, wanted Phase) {
 		case PhaseLiftObject:
 			action = framework.Action{0, 1, testPolicyGripRate(task)}
 		case PhaseMoveToTarget:
-			action = framework.Action{1, 0, testPolicyGripRate(task)}
+			deltaX := task.environment.state.TargetX - task.environment.state.ObjectX
+			horizontal := clamp(2*deltaX-0.8*task.environment.state.CarriageVelocityX, -1, 1)
+			action = framework.Action{float32(horizontal), 0, testPolicyGripRate(task)}
 		case PhaseLowerAtTarget:
 			action = framework.Action{0, -1, testPolicyGripRate(task)}
 		default:

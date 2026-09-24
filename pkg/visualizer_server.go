@@ -162,8 +162,8 @@ func (s *APIServer) approveCurriculumReview(w http.ResponseWriter, r *http.Reque
 	s.writeJSON(w, http.StatusOK, map[string]any{"status": "approved", "worker_id": request.WorkerID, "note": "No synthetic reward or success transition was recorded."})
 }
 
-// saveModel forwards a named, complete SAC checkpoint request to the local
-// learner. It intentionally remains available while the runtime is running:
+// saveModel asks the learner to overwrite its active CLI-named model with a
+// complete SAC checkpoint. It remains available while the runtime is running:
 // the learner serializes a lock-consistent snapshot without resetting workers.
 func (s *APIServer) saveModel(w http.ResponseWriter, r *http.Request) {
 	result, err := s.runtime.SaveCheckpoint(r.Context())
@@ -351,20 +351,16 @@ func (s *APIServer) telemetry() map[string]any {
 		if len(selected.LastAction) == 3 {
 			lastAction = selected.LastAction
 		}
-		forceRateCommand := lastAction[2]
-		filteredForceRateCommand := selected.Info["filtered_action_gripper"]
+		forceRateCommand := selected.Info["applied_action_gripper"]
+		filteredForceRateCommand := selected.Info["applied_action_gripper"]
 		forceActionMode := "hold"
-		if selected.Info["residual_control_enabled"] > 0 {
-			forceActionMode = "residual setpoint"
-		} else {
-			switch {
-			case float64(filteredForceRateCommand) <= config.ReleaseActionThreshold:
-				forceActionMode = "release"
-			case filteredForceRateCommand > float32(config.ActionDeadZone):
-				forceActionMode = "increase"
-			case filteredForceRateCommand < -float32(config.ActionDeadZone):
-				forceActionMode = "decrease"
-			}
+		switch {
+		case float64(filteredForceRateCommand) <= config.ReleaseActionThreshold:
+			forceActionMode = "release"
+		case filteredForceRateCommand > float32(config.ActionDeadZone):
+			forceActionMode = "increase"
+		case filteredForceRateCommand < -float32(config.ActionDeadZone):
+			forceActionMode = "decrease"
 		}
 		gripForce := denormalize(get(16), 0, config.MaxGripForce)
 		safeBounds := forcecontrol.SafeGripperBounds(runtimeConfig, carriageX)
@@ -390,7 +386,7 @@ func (s *APIServer) telemetry() map[string]any {
 			"workspace_min_x": config.Workspace.MinX, "workspace_max_x": config.Workspace.MaxX, "workspace_min_y": config.Workspace.MinY, "workspace_max_y": config.Workspace.MaxY,
 			"terrain":                map[string]any{"points": terrainPoints},
 			"last_action":            map[string]any{"horizontal": lastAction[0], "vertical": lastAction[1], "gripper": lastAction[2], "filtered_horizontal": selected.Info["filtered_action_horizontal"], "filtered_vertical": selected.Info["filtered_action_vertical"], "filtered_gripper": filteredForceRateCommand, "dead_zone_removed_horizontal": selected.Info["dead_zone_removed_horizontal"] > 0, "dead_zone_removed_vertical": selected.Info["dead_zone_removed_vertical"] > 0, "dead_zone_removed_gripper": selected.Info["dead_zone_removed_gripper"] > 0, "force_rate_command": forceRateCommand, "force_rate_newtons_per_second": float64(filteredForceRateCommand) * config.MaxGripForceRate, "force_action_mode": forceActionMode, "normalized_grip_force": lastAction[2]},
-			"control":                map[string]any{"control_mode": controlModeLabel(selected.Info["control_mode_code"]), "base_enabled": selected.Info["base_control_enabled"] > 0, "residual_enabled": selected.Info["residual_control_enabled"] > 0, "dt": selected.Info["control_timestep"], "phase_numeric": selected.Info["phase_numeric"], "phase_id": selected.Info["phase_id"], "raw_horizontal_action": selected.Info["raw_action_horizontal"], "raw_vertical_action": selected.Info["raw_action_vertical"], "raw_gripper_action": selected.Info["raw_action_gripper"], "filtered_horizontal_action": selected.Info["filtered_action_horizontal"], "filtered_vertical_action": selected.Info["filtered_action_vertical"], "filtered_gripper_action": selected.Info["filtered_action_gripper"], "base_action": map[string]any{"horizontal": selected.Info["base_action_horizontal"], "vertical": selected.Info["base_action_vertical"], "grip_target": selected.Info["base_grip_target"]}, "residual_action": map[string]any{"horizontal": selected.Info["residual_action_horizontal"], "vertical": selected.Info["residual_action_vertical"], "gripper": selected.Info["residual_action_gripper"]}, "final_action": map[string]any{"horizontal": selected.Info["final_action_horizontal"], "vertical": selected.Info["final_action_vertical"], "grip_target": selected.Info["final_grip_target"]}, "carriage_x": selected.Info["carriage_x"], "gripper_y": selected.Info["gripper_y"], "velocity_x": selected.Info["carriage_velocity_x"], "velocity_y": selected.Info["gripper_velocity_y"], "error_x": selected.Info["gripper_to_object_error_x"], "error_y": selected.Info["gripper_to_object_error_y"], "dx_error": selected.Info["dx_error"], "dy_error": selected.Info["dy_error"], "hover_penalty_accumulated": selected.Info["hover_penalty_accumulated"], "reward_descent_progress": selected.Info["reward_descent_progress"], "upward_retraction_penalty": selected.Info["upward_retraction_penalty"], "vertical_retraction_blocked": selected.Info["vertical_retraction_blocked"] > 0, "vertical_acceleration": selected.Info["vertical_acceleration"], "boundary_hit": selected.Info["boundary_hit"] > 0, "invalid_contact_frames": selected.Info["invalid_contact_frames"], "contact_without_grip_frames": selected.Info["contact_without_grip_frames"], "contact_bonus_awarded": selected.Info["contact_bonus_awarded"] > 0, "object_was_lifted": selected.Info["object_was_lifted"] > 0, "lift_hold_frames": selected.Info["lift_hold_frames"], "lift_hold_frames_required": selected.Info["lift_hold_frames_required"], "slip_severity": selected.Info["slip_severity"], "slip_frames": selected.Info["slip_frames"]},
+			"control":                map[string]any{"control_mode": controlModeLabel(selected.Info["control_mode_code"]), "base_enabled": selected.Info["base_control_enabled"] > 0, "residual_enabled": selected.Info["residual_control_enabled"] > 0, "dt": selected.Info["control_timestep"], "phase_numeric": selected.Info["phase_numeric"], "phase_id": selected.Info["phase_id"], "raw_horizontal_action": selected.Info["raw_action_horizontal"], "raw_vertical_action": selected.Info["raw_action_vertical"], "raw_gripper_action": selected.Info["raw_action_gripper"], "filtered_horizontal_action": selected.Info["filtered_action_horizontal"], "filtered_vertical_action": selected.Info["filtered_action_vertical"], "filtered_gripper_action": selected.Info["filtered_action_gripper"], "base_action": map[string]any{"horizontal": selected.Info["base_action_horizontal"], "vertical": selected.Info["base_action_vertical"], "gripper": selected.Info["base_action_gripper"]}, "residual_action": map[string]any{"horizontal": selected.Info["residual_action_horizontal"], "vertical": selected.Info["residual_action_vertical"], "gripper": selected.Info["residual_action_gripper"]}, "final_action": map[string]any{"horizontal": selected.Info["final_action_horizontal"], "vertical": selected.Info["final_action_vertical"], "gripper": selected.Info["final_action_gripper"]}, "applied_action": map[string]any{"horizontal": selected.Info["applied_action_horizontal"], "vertical": selected.Info["applied_action_vertical"], "gripper": selected.Info["applied_action_gripper"]}, "carriage_x": selected.Info["carriage_x"], "gripper_y": selected.Info["gripper_y"], "velocity_x": selected.Info["carriage_velocity_x"], "velocity_y": selected.Info["gripper_velocity_y"], "error_x": selected.Info["gripper_to_object_error_x"], "error_y": selected.Info["gripper_to_object_error_y"], "dx_error": selected.Info["dx_error"], "dy_error": selected.Info["dy_error"], "hover_penalty_accumulated": selected.Info["hover_penalty_accumulated"], "reward_descent_progress": selected.Info["reward_descent_progress"], "upward_retraction_penalty": selected.Info["upward_retraction_penalty"], "vertical_retraction_blocked": selected.Info["vertical_retraction_blocked"] > 0, "vertical_acceleration": selected.Info["vertical_acceleration"], "boundary_hit": selected.Info["boundary_hit"] > 0, "invalid_contact_frames": selected.Info["invalid_contact_frames"], "contact_without_grip_frames": selected.Info["contact_without_grip_frames"], "contact_bonus_awarded": selected.Info["contact_bonus_awarded"] > 0, "object_was_lifted": selected.Info["object_was_lifted"] > 0, "lift_hold_frames": selected.Info["lift_hold_frames"], "lift_hold_frames_required": selected.Info["lift_hold_frames_required"], "slip_severity": selected.Info["slip_severity"], "slip_frames": selected.Info["slip_frames"]},
 			"latest_vertical_action": lastAction[1], "velocity_y": denormalize(get(3), -config.MaxVerticalSpeed, config.MaxVerticalSpeed), "target_grasp_y": targetGraspY, "vertical_error": targetGraspY - gripperY,
 			"last_reward": selected.LastReward, "cumulative_reward": selected.EpisodeReward, "distance_to_object": selected.Info["gripper_to_object_distance"], "distance_to_target": selected.Info["object_to_target_distance"],
 			"contact_detected": contactDetected, "object_attached": objectAttached, "object_stable": selected.Info["object_stable"] > 0, "slipping": selected.Info["slipping"] > 0,

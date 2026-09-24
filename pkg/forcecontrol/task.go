@@ -24,6 +24,7 @@ type Task struct {
 }
 
 var _ framework.Task = (*Task)(nil)
+var _ framework.DecomposedActionTask = (*Task)(nil)
 var _ framework.ReviewableTask = (*Task)(nil)
 var _ framework.TelemetryTask = (*Task)(nil)
 
@@ -70,10 +71,21 @@ func (t *Task) TelemetryMetadata() map[string]any {
 }
 
 func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
+	return t.step(action, nil, nil)
+}
+
+// StepDecomposed receives all three outputs from the same immutable actor
+// snapshot. The selected runtime control mode decides which vector reaches the
+// plant; no task-solving script participates in that decision.
+func (t *Task) StepDecomposed(final, flyBase, residual framework.Action) (framework.StepResult, error) {
+	return t.step(final, flyBase, residual)
+}
+
+func (t *Task) step(action, flyBase, residual framework.Action) (framework.StepResult, error) {
 	if t == nil || t.environment == nil {
 		return framework.StepResult{}, errors.New("force-control task is not initialized")
 	}
-	_, reward, outcome, done, err := t.environment.step(action)
+	_, reward, outcome, done, err := t.environment.stepDecomposed(action, flyBase, residual)
 	if err != nil {
 		return framework.StepResult{}, err
 	}
@@ -90,13 +102,18 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"residual_control_enabled":              float32(boolToFloat(t.config.EffectiveControlMode() == ModeResidual)),
 		"base_action_horizontal":                float32(t.environment.baseAction[0]),
 		"base_action_vertical":                  float32(t.environment.baseAction[1]),
+		"base_action_gripper":                   float32(t.environment.baseAction[2]),
 		"base_grip_target":                      float32(t.environment.baseAction[2]),
 		"residual_action_horizontal":            float32(t.environment.residualAction[0]),
 		"residual_action_vertical":              float32(t.environment.residualAction[1]),
 		"residual_action_gripper":               float32(t.environment.residualAction[2]),
 		"final_action_horizontal":               float32(t.environment.finalAction[0]),
 		"final_action_vertical":                 float32(t.environment.finalAction[1]),
+		"final_action_gripper":                  float32(t.environment.finalAction[2]),
 		"final_grip_target":                     float32(t.environment.finalAction[2]),
+		"applied_action_horizontal":             float32(t.environment.appliedAction[0]),
+		"applied_action_vertical":               float32(t.environment.appliedAction[1]),
+		"applied_action_gripper":                float32(t.environment.appliedAction[2]),
 		"dead_zone_removed_horizontal":          float32(boolToFloat(t.environment.deadZoneRemoved[0] || t.environment.filterDeadZoneRemoved[0])),
 		"dead_zone_removed_vertical":            float32(boolToFloat(t.environment.deadZoneRemoved[1] || t.environment.filterDeadZoneRemoved[1])),
 		"dead_zone_removed_gripper":             float32(boolToFloat(t.environment.deadZoneRemoved[2] || t.environment.filterDeadZoneRemoved[2])),
@@ -171,7 +188,10 @@ func (t *Task) Step(action framework.Action) (framework.StepResult, error) {
 		"penalty_reward":                        float32(breakdown.Penalty),
 		"total_step_reward":                     float32(breakdown.Total),
 	}
-	return framework.StepResult{State: t.environment.observation(), Reward: float32(reward), Outcome: outcome, Done: done, Info: info}, nil
+	return framework.StepResult{
+		State: t.environment.observation(), Reward: float32(reward), Outcome: outcome,
+		Done: done, Info: info, AppliedAction: float32Action(t.environment.appliedAction),
+	}, nil
 }
 
 func actionValue(action framework.Action, index int) float32 {

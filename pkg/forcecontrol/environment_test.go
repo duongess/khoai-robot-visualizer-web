@@ -952,7 +952,7 @@ func TestSustainedInsufficientContactForceIsNotAFreePolicy(t *testing.T) {
 	}
 }
 
-func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
+func TestGripForceHasBoundedSlewAndReleaseGuard(t *testing.T) {
 	config := DefaultConfig()
 	config.InitialCarriageX = config.InitialObjectX
 	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
@@ -976,8 +976,8 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	if _, err := task.Step(framework.Action{0, 0, -1}); err != nil {
 		t.Fatal(err)
 	}
-	if task.environment.state.GripForce != 0 || task.environment.state.Grip.GripperClosed {
-		t.Fatalf("release command did not immediately open: %#v", task.environment.state.Grip)
+	if task.environment.state.GripForce != 0 || !task.environment.state.Grip.GripperClosed {
+		t.Fatalf("airborne release guard changed grip state: %#v", task.environment.state.Grip)
 	}
 }
 
@@ -1269,6 +1269,11 @@ func TestMassAndFrictionChangePolicyForceDemandWithoutLeakingRequirement(t *test
 
 func TestContinuousGripDetachesOnlyForReleaseOrSustainedLoss(t *testing.T) {
 	released := attachedTask(t, DefaultConfig())
+	released.environment.state.Phase = PhaseReleaseObject
+	released.environment.state.CarriageX = released.environment.state.TargetX
+	released.environment.state.ObjectX = released.environment.state.TargetX
+	released.environment.state.GripperY = released.environment.targetReleaseGuideHeight()
+	released.environment.state.ObjectY = released.environment.targetRestHeight()
 	if _, err := released.Step(framework.Action{0, 0, -1}); err != nil {
 		t.Fatal(err)
 	}
@@ -2232,7 +2237,7 @@ func TestAttachedTransportAwayFromTargetIsNotProfitable(t *testing.T) {
 	}
 }
 
-func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
+func TestNegativeGripCommandCannotDropDuringTransport(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = true
 	task := attachedTask(t, config)
@@ -2243,11 +2248,11 @@ func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Done || result.Outcome != OutcomeFailure || result.Reward > float32(task.config.Reward.MidAirDropPenalty) || result.Info["failure_reason_code"] != 8 {
-		t.Fatalf("mid-air transport drop was not penalized: %#v", result)
+	if result.Done || result.Outcome != OutcomeRunning || !task.environment.state.Grip.ObjectAttached || result.Info["object_released"] != 0 {
+		t.Fatalf("negative grip command caused an unsafe transport drop: %#v", result)
 	}
-	if got, want := task.environment.state.Energy, previousEnergy-task.config.Homeostasis.EnergyDecayPerStep-task.config.Homeostasis.UnsafeDropEnergyLoss; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != float32(energyEventUnsafeDrop) {
-		t.Fatalf("unsafe drop energy loss mismatch: got=%v want=%v info=%#v", got, want, result.Info)
+	if got, want := task.environment.state.Energy, previousEnergy-task.config.Homeostasis.EnergyDecayPerStep; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != 0 {
+		t.Fatalf("blocked release should only decay energy: got=%v want=%v info=%#v", got, want, result.Info)
 	}
 }
 

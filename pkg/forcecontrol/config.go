@@ -8,13 +8,14 @@ import "math"
 type ControlMode string
 
 const (
-	ModeBaseOnly ControlMode = "base_only"
-	ModeResidual ControlMode = "residual"
-	ModePureRL   ControlMode = "pure_rl"
+	ModeBaseOnly      ControlMode = "base_only"
+	ModeResidual      ControlMode = "residual"
+	ModePureRL        ControlMode = "pure_rl"
+	ModeParametricSAC ControlMode = "parametric_sac"
 )
 
 func (mode ControlMode) Valid() bool {
-	return mode == ModeBaseOnly || mode == ModeResidual || mode == ModePureRL
+	return mode == ModeBaseOnly || mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC
 }
 
 // code is a compact stable telemetry encoding. Keep it separate from the
@@ -27,6 +28,8 @@ func (mode ControlMode) code() int {
 		return 2
 	case ModePureRL:
 		return 3
+	case ModeParametricSAC:
+		return 4
 	default:
 		return 0
 	}

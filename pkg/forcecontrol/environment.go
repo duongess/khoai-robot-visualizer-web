@@ -592,7 +592,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
 	if decompositionAvailable {
 		switch e.config.EffectiveControlMode() {
-		case ModeBaseOnly:
+		case ModeBaseOnly, ModeParametricSAC:
 			selected = baseValues
 		case ModePureRL:
 			selected = residualValues

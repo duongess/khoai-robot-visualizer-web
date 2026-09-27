@@ -191,6 +191,7 @@ export const SimulationControls: React.FC = () => {
 					['base_only', 'Base only'],
 					['residual', 'Residual'],
 					['pure_rl', 'Pure RL'],
+					['parametric_sac', 'Parametric SAC'],
 				] as const).map(([mode, label]) => (
 					<button
 						key={mode}

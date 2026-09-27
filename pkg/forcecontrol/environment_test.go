@@ -289,6 +289,7 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 		{ModeBaseOnly, -0.8},
 		{ModeResidual, 0.4},
 		{ModePureRL, 0.7},
+		{ModeParametricSAC, -0.8},
 	}
 	for _, test := range tests {
 		config := DefaultConfig()

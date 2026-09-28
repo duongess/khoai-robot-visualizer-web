@@ -143,6 +143,7 @@ func TestKnownActionsMoveGripperAndAreClamped(t *testing.T) {
 func TestPrematureDescentPenaltyOnlyActivatesBelowTravelClearance(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
+	config.Reward.ApproachStallPenalty = 0 // Isolate the premature-descent shaping under test.
 	env := newEnvironment(101, config)
 	env.reset()
 	previous := env.state
@@ -499,7 +500,7 @@ func TestAllCurriculumResetsKeepObjectAndTargetDistinct(t *testing.T) {
 	}
 }
 
-func TestPhaseOneApproachProgressRewardsEachSignedHorizontalReduction(t *testing.T) {
+func TestPhaseOneApproachProgressRewardsPositiveHorizontalReduction(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	config.Curriculum.Stage = CurriculumAlignAndContact
@@ -514,11 +515,44 @@ func TestPhaseOneApproachProgressRewardsEachSignedHorizontalReduction(t *testing
 	if want := config.Reward.ApproachProgressScale * 0.001; math.Abs(closer.Approach-want) > 1e-9 {
 		t.Fatalf("one-millimetre approach reward = %v, want %v", closer.Approach, want)
 	}
-	if want := -config.Reward.ApproachProgressScale * 0.001; math.Abs(away.Approach-want) > 1e-9 {
-		t.Fatalf("one-millimetre retreat reward = %v, want %v", away.Approach, want)
+	if away.Approach != 0 {
+		t.Fatalf("one-millimetre retreat should not earn progress reward: %v", away.Approach)
 	}
 	if closer.Total <= away.Total {
 		t.Fatalf("horizontal reduction must beat retreat: closer=%#v away=%#v", closer, away)
+	}
+}
+
+func TestDetachedApproachIdleReceivesStallPenaltyAndTimeout(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Reward.ActionMagnitudePenaltyScale = 0
+	config.Reward.ActionDeltaPenaltyScale = 0
+	config.Reward.JerkYPenaltyScale = 0
+	environment := newEnvironment(22, config)
+	previous := State{Phase: PhaseApproachObject, CarriageX: 2, ObjectX: 1}
+	environment.state = previous
+	idle := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	want := config.Reward.TimePenalty + config.Reward.ApproachStallPenalty
+	if math.Abs(idle.Penalty-want) > 1e-9 {
+		t.Fatalf("idle approach penalty = %v, want %v", idle.Penalty, want)
+	}
+	if idle.Total >= config.Reward.TimePenalty {
+		t.Fatalf("idle approach did not degrade reward beyond time cost: %+v", idle)
+	}
+
+	environment.state.EpisodeStep = 120
+	if reason := environment.detectFailure(previous); reason != "approach_timeout" {
+		t.Fatalf("approach failure reason = %q, want approach_timeout", reason)
+	}
+	if penalty := environment.failurePenalty("approach_timeout"); penalty != config.Reward.UnsafeDropPenalty {
+		t.Fatalf("approach timeout penalty = %v, want %v", penalty, config.Reward.UnsafeDropPenalty)
+	}
+}
+
+func TestDefaultActionDeadZoneAllowsFineControl(t *testing.T) {
+	if got := DefaultConfig().ActionDeadZone; got != 0.02 {
+		t.Fatalf("action dead zone = %v, want 0.02", got)
 	}
 }
 
@@ -1178,7 +1212,7 @@ func TestLoweringRetractionAndVerticalJerkAreMoreCostlyThanDirectDescent(t *test
 	if retraction.Retraction != -config.Reward.UpwardRetractionPenalty {
 		t.Fatalf("upward lower-phase motion missed retraction penalty: %#v", retraction)
 	}
-	if want := -config.Reward.JerkYPenaltyScale; math.Abs(retraction.Smoothness-want) > 1e-9 {
+	if want := -0.2 * config.Reward.JerkYPenaltyScale; math.Abs(retraction.Smoothness-want) > 1e-9 {
 		t.Fatalf("vertical jerk penalty = %v, want %v", retraction.Smoothness, want)
 	}
 

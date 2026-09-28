@@ -1252,7 +1252,8 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		breakdown.Grip += e.config.Residual.SecureGraspBonus
 		e.secureGripBonusAwarded = true
 	}
-	if previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
+	if previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken &&
+		(previous.Phase != PhaseLiftObject || e.objectWasLifted) {
 		// This intentionally remains smaller than TimePenalty. It makes keeping
 		// a real grasp denser and safer than release, but cannot become a
 		// stationary-hold reward pump during lift or transport.
@@ -1274,7 +1275,13 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		// deliberately independent of force-control semantics: the policy still
 		// chooses force, but weak/no-force actions now receive an immediate cost
 		// instead of waiting for a later drop or timeout.
-		breakdown.LiftStall = -e.config.Reward.LiftStallPenalty
+		stallPenalty := e.config.Reward.LiftStallPenalty
+		if previous.Phase == PhaseLiftObject && !e.objectWasLifted && e.state.ObjectY <= previous.ObjectY {
+			// Do not let a stationary attached object farm the hold signal.
+			// A fivefold stall cost makes upward exploration preferable.
+			stallPenalty *= 5.0
+		}
+		breakdown.LiftStall = -stallPenalty
 		breakdown.Penalty += breakdown.LiftStall
 	}
 	// Delivery reward is intentionally impossible without a secure attachment

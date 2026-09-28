@@ -270,7 +270,7 @@ func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
 	previous := environment.state
 
 	stalled := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	if got, want := stalled.LiftStall, -config.Reward.LiftStallPenalty; math.Abs(got-want) > 1e-9 {
+	if got, want := stalled.LiftStall, -5*config.Reward.LiftStallPenalty; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("stalled lift penalty = %v, want %v", got, want)
 	}
 
@@ -1548,6 +1548,8 @@ func TestFullPickAndPlaceRewardIncludesSecureHold(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumFullPickAndPlace
 	task := attachedTask(t, config)
+	// This test covers the post-verification hold signal.
+	task.environment.objectWasLifted = true
 	result, err := task.Step(framework.Action{0, 0, 0})
 	if err != nil {
 		t.Fatal(err)
@@ -2349,5 +2351,27 @@ func testPolicyGripRate(task *Task) float32 {
 		return -0.5
 	default:
 		return 0
+	}
+}
+
+func TestLiftPhaseDoesNotSubsidizeStationaryAttachment(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	config.Reward.TimePenalty = 0
+	environment := newEnvironment(47, config)
+	environment.reset()
+	environment.state.Phase = PhaseLiftObject
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	environment.state.GripForce = environment.requiredForce()
+	environment.state.ObjectY = environment.requiredCarryHeight() - 0.20
+	previous := environment.state
+
+	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if reward.Grip != 0 {
+		t.Fatalf("stationary unlifted attachment received hold subsidy")
+	}
+	if reward.LiftStall != -5*config.Reward.LiftStallPenalty {
+		t.Fatalf("stationary unlifted attachment did not receive amplified stall penalty: %v", reward.LiftStall)
 	}
 }

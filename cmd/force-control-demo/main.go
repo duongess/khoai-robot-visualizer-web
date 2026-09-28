@@ -62,12 +62,10 @@ func main() {
 	}
 	if stage := os.Getenv("FORCE_CONTROL_CURRICULUM"); stage != "" {
 		config.Curriculum.Stage = forcecontrol.CurriculumStage(stage)
-		// Any explicitly selected lesson is a training distribution rather than
-		// a fixed demonstration scene. Keep full pick-and-place deterministic
-		// unless it is reached through auto, whose flag remains enabled.
-		if config.Curriculum.Stage != forcecontrol.CurriculumFullPickAndPlace {
-			config.Curriculum.Randomization.Enabled = true
-		}
+		// An explicitly selected curriculum is a training distribution, including
+		// full pick-and-place. The first reset preserves the configured scene for
+		// reproducible startup; subsequent resets vary object, target, and terrain.
+		config.Curriculum.Randomization.Enabled = true
 	}
 	if err := forcecontrol.Register(runtime, config); err != nil {
 		log.Fatalf("register force-control task: %v", err)

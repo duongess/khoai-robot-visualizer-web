@@ -105,7 +105,7 @@ func (s *APIServer) updateControlMode(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil || !request.ControlMode.Valid() {
-		s.writeError(w, http.StatusBadRequest, "INVALID_CONTROL_MODE", "control_mode must be base_only, residual, or pure_rl.")
+		s.writeError(w, http.StatusBadRequest, "INVALID_CONTROL_MODE", "control_mode must be base_only, residual, pure_rl, or parametric_sac.")
 		return
 	}
 
@@ -446,6 +446,8 @@ func controlModeLabel(code float32) string {
 		return string(forcecontrol.ModeResidual)
 	case 3:
 		return string(forcecontrol.ModePureRL)
+	case 4:
+		return string(forcecontrol.ModeParametricSAC)
 	default:
 		return ""
 	}

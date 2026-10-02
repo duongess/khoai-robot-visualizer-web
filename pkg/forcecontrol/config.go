@@ -8,13 +8,14 @@ import "math"
 type ControlMode string
 
 const (
-	ModeBaseOnly ControlMode = "base_only"
-	ModeResidual ControlMode = "residual"
-	ModePureRL   ControlMode = "pure_rl"
+	ModeBaseOnly      ControlMode = "base_only"
+	ModeResidual      ControlMode = "residual"
+	ModePureRL        ControlMode = "pure_rl"
+	ModeParametricSAC ControlMode = "parametric_sac"
 )
 
 func (mode ControlMode) Valid() bool {
-	return mode == ModeBaseOnly || mode == ModeResidual || mode == ModePureRL
+	return mode == ModeBaseOnly || mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC
 }
 
 // code is a compact stable telemetry encoding. Keep it separate from the
@@ -27,6 +28,8 @@ func (mode ControlMode) code() int {
 		return 2
 	case ModePureRL:
 		return 3
+	case ModeParametricSAC:
+		return 4
 	default:
 		return 0
 	}
@@ -208,8 +211,9 @@ type RewardConfig struct {
 	// JerkYPenaltyScale is a quadratic cost on changes to the vertical action.
 	// It makes rapid lower/retract ratcheting expensive even before a sign flip.
 	JerkYPenaltyScale float64
-	// ApproachProgressScale multiplies previousDX-currentDX, so every genuine
-	// approach transition is rewarded and every retreat is penalized.
+	// ApproachProgressScale multiplies a positive previousDX-currentDX, so
+	// only genuine approach transitions earn dense progress reward. Retreat
+	// and idling are handled by ApproachStallPenalty.
 	ApproachProgressScale     float64
 	AlignDistancePenaltyScale float64
 	// SuccessfulContactReward is a one-time terminal reward for a verified
@@ -313,10 +317,10 @@ type RewardConfig struct {
 	// secure physical attachment during the grasp lesson. It is time-scaled in
 	// the environment so it remains stable if TimeStep changes.
 	GraspHoldRewardPerSecond float64
-	// AttachedHoldRewardPerSecond applies to every non-slipping attachment in
-	// every lesson. It is deliberately below the per-second time cost, so it
-	// makes holding preferable to dropping without making stationary holding a
-	// profitable way to consume a whole full-task episode.
+	// AttachedHoldRewardPerSecond applies to non-slipping attachments after a
+	// verified lift (and throughout the other task phases). It is deliberately
+	// below the per-second time cost; unverified PhaseLiftObject holds receive no
+	// subsidy and are governed by the lift-stall penalty.
 	AttachedHoldRewardPerSecond float64
 }
 
@@ -455,7 +459,7 @@ func DefaultConfig() Config {
 		InitialGripperY:          2.8,
 		TargetX:                  4.5,
 		TargetWidth:              0.8,
-		MaxEpisodeSteps:          1000,
+		MaxEpisodeSteps:          150,
 		HorizontalTolerance:      0.15,
 		VerticalTolerance:        0.10,
 		GraspHorizontalTolerance: 0.15,
@@ -471,7 +475,7 @@ func DefaultConfig() Config {
 		// early descent commands (for example -0.004). Hardware still clamps all
 		// commands; this intentionally small, configurable dead zone only removes
 		// numerical noise rather than exploration.
-		ActionDeadZone: 0.001,
+		ActionDeadZone: 0.02,
 		// Kept opt-in in the library so low-level environment tests can still
 		// exercise the raw action-rate plant. The force-control demo enables it
 		// by default and is therefore the production residual-RL path.
@@ -633,7 +637,7 @@ func DefaultConfig() Config {
 			LoweringStepPenalty:            0.04,
 			// While still horizontally out of reach, lowering alone is not useful
 			// progress and must not be a cheap way to wait out an episode.
-			ApproachStallPenalty: -0.02,
+			ApproachStallPenalty: -0.05,
 			// The grasp lesson's secure hold earns dense feedback after a valid
 			// attachment; transport relies on object-to-target progress instead.
 			GraspHoldRewardPerSecond: 0.50,

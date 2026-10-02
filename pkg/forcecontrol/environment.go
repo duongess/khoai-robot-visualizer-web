@@ -592,7 +592,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
 	if decompositionAvailable {
 		switch e.config.EffectiveControlMode() {
-		case ModeBaseOnly:
+		case ModeBaseOnly, ModeParametricSAC:
 			selected = baseValues
 		case ModePureRL:
 			selected = residualValues
@@ -1013,6 +1013,11 @@ func (e *Environment) detectFailure(previous State) string {
 	case e.currentCurriculumStage() == CurriculumGrasp &&
 		e.contactWithoutGripFrames >= e.config.Reward.ContactWithoutGripTimeoutFrames:
 		return "idle_contact_timeout"
+	case e.state.Phase == PhaseApproachObject && e.state.EpisodeStep >= 120:
+		// Do not let an approach policy spend the full episode hovering or
+		// oscillating away from the object. This is intentionally evaluated
+		// before the generic episode limit.
+		return "approach_timeout"
 	case e.state.EpisodeStep >= e.maxEpisodeSteps():
 		return "timeout"
 	}
@@ -1168,11 +1173,12 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		previousDY := e.graspGuideErrorFor(previous)
 		switch {
 		case currentDX > e.config.Reward.AlignmentEpsilonX:
-			// Phase 1: reward the signed reduction in horizontal error over this
-			// transition. Unlike a tanh(distance) potential, this remains useful
-			// across the full rail: toward is positive, retreat is negative.
+			// Phase 1: pay only for a genuine horizontal reduction. Lack of
+			// progress is handled below by a separate, persistent stall penalty.
 			deltaDX := previousDX - currentDX
-			breakdown.Approach += e.config.Reward.ApproachProgressScale * deltaDX
+			if deltaDX > 0 {
+				breakdown.Approach += e.config.Reward.ApproachProgressScale * deltaDX
+			}
 			// Penalize only real lowering toward the grasp guide/clearance band,
 			// not normal travel near the ceiling. The latter would train a
 			// self-reinforcing “hover at the top rail” policy instead of an
@@ -1199,6 +1205,16 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 			// whether a real grasp was made.
 		}
 	}
+	// Detached approach and lowering cannot be a cost-free waiting state. Keep
+	// this outside the contact-bonus gate: the actor must either close the X
+	// error or proceed to a real attachment instead of parking near the object.
+	if !attached && (previous.Phase == PhaseApproachObject || previous.Phase == PhaseLowerToObject) {
+		currentDistX := math.Abs(e.state.CarriageX - e.state.ObjectX)
+		previousDistX := math.Abs(previous.CarriageX - previous.ObjectX)
+		if previousDistX <= currentDistX {
+			breakdown.Penalty += e.config.Reward.ApproachStallPenalty
+		}
+	}
 	regularizedAction, regularizedPrevious := action, previousAction
 	if e.state.Grip.ContactDetected && action[2] > 0 {
 		// Positive contact force is the residual loop's means of probing friction
@@ -1206,10 +1222,14 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		// or jerk costs; the near-break barrier still limits unsafe force.
 		regularizedAction[2], regularizedPrevious[2] = 0, 0
 	}
-	breakdown.Smoothness = -e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(regularizedAction) -
-		e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(regularizedAction, regularizedPrevious)
+	// Motor exploration must be cheaper than making measurable task progress.
+	// Keep the configured relative weights, while reducing all generic motion
+	// regularizers fivefold for both residual and parametric SAC collection.
+	const motionRegularizationScale = 0.2
+	breakdown.Smoothness = -motionRegularizationScale*e.config.Reward.ActionMagnitudePenaltyScale*actionSquared(regularizedAction) -
+		motionRegularizationScale*e.config.Reward.ActionDeltaPenaltyScale*actionSquaredDifference(regularizedAction, regularizedPrevious)
 	jerkY := regularizedAction[1] - regularizedPrevious[1]
-	breakdown.Smoothness -= e.config.Reward.JerkYPenaltyScale * jerkY * jerkY
+	breakdown.Smoothness -= motionRegularizationScale * e.config.Reward.JerkYPenaltyScale * jerkY * jerkY
 	for _, index := range [...]int{1, 2} { // vertical and force-rate actions
 		if regularizedAction[index]*regularizedPrevious[index] < 0 {
 			breakdown.Smoothness -= e.config.Reward.ActionFlipPenalty * math.Abs(regularizedAction[index]-regularizedPrevious[index])
@@ -1252,7 +1272,8 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		breakdown.Grip += e.config.Residual.SecureGraspBonus
 		e.secureGripBonusAwarded = true
 	}
-	if previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken {
+	if previous.Grip.ObjectAttached && attached && !e.state.Grip.Slipping && !e.state.ObjectBroken &&
+		(previous.Phase != PhaseLiftObject || e.objectWasLifted) {
 		// This intentionally remains smaller than TimePenalty. It makes keeping
 		// a real grasp denser and safer than release, but cannot become a
 		// stationary-hold reward pump during lift or transport.
@@ -1274,7 +1295,13 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 		// deliberately independent of force-control semantics: the policy still
 		// chooses force, but weak/no-force actions now receive an immediate cost
 		// instead of waiting for a later drop or timeout.
-		breakdown.LiftStall = -e.config.Reward.LiftStallPenalty
+		stallPenalty := e.config.Reward.LiftStallPenalty
+		if previous.Phase == PhaseLiftObject && !e.objectWasLifted && e.state.ObjectY <= previous.ObjectY {
+			// Do not let a stationary attached object farm the hold signal.
+			// A fivefold stall cost makes upward exploration preferable.
+			stallPenalty *= 5.0
+		}
+		breakdown.LiftStall = -stallPenalty
 		breakdown.Penalty += breakdown.LiftStall
 	}
 	// Delivery reward is intentionally impossible without a secure attachment
@@ -1434,6 +1461,8 @@ func (e *Environment) failurePenalty(reason string) float64 {
 		return e.config.Reward.BreakPenalty
 	case "idle_contact_timeout":
 		return e.config.Reward.IdleContactTimeoutPenalty
+	case "approach_timeout":
+		return e.config.Reward.UnsafeDropPenalty
 	case "workspace_violation":
 		return e.config.Reward.WorkspacePenalty
 	case "mid_air_drop":
@@ -1465,6 +1494,8 @@ func (e *Environment) failureReasonCode() int {
 		return 7
 	case "mid_air_drop":
 		return 8
+	case "approach_timeout":
+		return 9
 	default:
 		return 0
 	}

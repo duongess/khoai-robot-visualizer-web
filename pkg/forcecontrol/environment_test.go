@@ -143,6 +143,7 @@ func TestKnownActionsMoveGripperAndAreClamped(t *testing.T) {
 func TestPrematureDescentPenaltyOnlyActivatesBelowTravelClearance(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
+	config.Reward.ApproachStallPenalty = 0 // Isolate the premature-descent shaping under test.
 	env := newEnvironment(101, config)
 	env.reset()
 	previous := env.state
@@ -270,7 +271,7 @@ func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
 	previous := environment.state
 
 	stalled := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	if got, want := stalled.LiftStall, -config.Reward.LiftStallPenalty; math.Abs(got-want) > 1e-9 {
+	if got, want := stalled.LiftStall, -5*config.Reward.LiftStallPenalty; math.Abs(got-want) > 1e-9 {
 		t.Fatalf("stalled lift penalty = %v, want %v", got, want)
 	}
 
@@ -289,6 +290,7 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 		{ModeBaseOnly, -0.8},
 		{ModeResidual, 0.4},
 		{ModePureRL, 0.7},
+		{ModeParametricSAC, -0.8},
 	}
 	for _, test := range tests {
 		config := DefaultConfig()
@@ -498,7 +500,7 @@ func TestAllCurriculumResetsKeepObjectAndTargetDistinct(t *testing.T) {
 	}
 }
 
-func TestPhaseOneApproachProgressRewardsEachSignedHorizontalReduction(t *testing.T) {
+func TestPhaseOneApproachProgressRewardsPositiveHorizontalReduction(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
 	config.Curriculum.Stage = CurriculumAlignAndContact
@@ -513,11 +515,44 @@ func TestPhaseOneApproachProgressRewardsEachSignedHorizontalReduction(t *testing
 	if want := config.Reward.ApproachProgressScale * 0.001; math.Abs(closer.Approach-want) > 1e-9 {
 		t.Fatalf("one-millimetre approach reward = %v, want %v", closer.Approach, want)
 	}
-	if want := -config.Reward.ApproachProgressScale * 0.001; math.Abs(away.Approach-want) > 1e-9 {
-		t.Fatalf("one-millimetre retreat reward = %v, want %v", away.Approach, want)
+	if away.Approach != 0 {
+		t.Fatalf("one-millimetre retreat should not earn progress reward: %v", away.Approach)
 	}
 	if closer.Total <= away.Total {
 		t.Fatalf("horizontal reduction must beat retreat: closer=%#v away=%#v", closer, away)
+	}
+}
+
+func TestDetachedApproachIdleReceivesStallPenaltyAndTimeout(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Reward.ActionMagnitudePenaltyScale = 0
+	config.Reward.ActionDeltaPenaltyScale = 0
+	config.Reward.JerkYPenaltyScale = 0
+	environment := newEnvironment(22, config)
+	previous := State{Phase: PhaseApproachObject, CarriageX: 2, ObjectX: 1}
+	environment.state = previous
+	idle := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	want := config.Reward.TimePenalty + config.Reward.ApproachStallPenalty
+	if math.Abs(idle.Penalty-want) > 1e-9 {
+		t.Fatalf("idle approach penalty = %v, want %v", idle.Penalty, want)
+	}
+	if idle.Total >= config.Reward.TimePenalty {
+		t.Fatalf("idle approach did not degrade reward beyond time cost: %+v", idle)
+	}
+
+	environment.state.EpisodeStep = 120
+	if reason := environment.detectFailure(previous); reason != "approach_timeout" {
+		t.Fatalf("approach failure reason = %q, want approach_timeout", reason)
+	}
+	if penalty := environment.failurePenalty("approach_timeout"); penalty != config.Reward.UnsafeDropPenalty {
+		t.Fatalf("approach timeout penalty = %v, want %v", penalty, config.Reward.UnsafeDropPenalty)
+	}
+}
+
+func TestDefaultActionDeadZoneAllowsFineControl(t *testing.T) {
+	if got := DefaultConfig().ActionDeadZone; got != 0.02 {
+		t.Fatalf("action dead zone = %v, want 0.02", got)
 	}
 }
 
@@ -952,7 +987,7 @@ func TestSustainedInsufficientContactForceIsNotAFreePolicy(t *testing.T) {
 	}
 }
 
-func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
+func TestGripForceHasBoundedSlewAndReleaseGuard(t *testing.T) {
 	config := DefaultConfig()
 	config.InitialCarriageX = config.InitialObjectX
 	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
@@ -976,8 +1011,8 @@ func TestGripForceHasBoundedSlewAndImmediateRelease(t *testing.T) {
 	if _, err := task.Step(framework.Action{0, 0, -1}); err != nil {
 		t.Fatal(err)
 	}
-	if task.environment.state.GripForce != 0 || task.environment.state.Grip.GripperClosed {
-		t.Fatalf("release command did not immediately open: %#v", task.environment.state.Grip)
+	if task.environment.state.GripForce != 0 || !task.environment.state.Grip.GripperClosed {
+		t.Fatalf("airborne release guard changed grip state: %#v", task.environment.state.Grip)
 	}
 }
 
@@ -1177,7 +1212,7 @@ func TestLoweringRetractionAndVerticalJerkAreMoreCostlyThanDirectDescent(t *test
 	if retraction.Retraction != -config.Reward.UpwardRetractionPenalty {
 		t.Fatalf("upward lower-phase motion missed retraction penalty: %#v", retraction)
 	}
-	if want := -config.Reward.JerkYPenaltyScale; math.Abs(retraction.Smoothness-want) > 1e-9 {
+	if want := -0.2 * config.Reward.JerkYPenaltyScale; math.Abs(retraction.Smoothness-want) > 1e-9 {
 		t.Fatalf("vertical jerk penalty = %v, want %v", retraction.Smoothness, want)
 	}
 
@@ -1269,6 +1304,11 @@ func TestMassAndFrictionChangePolicyForceDemandWithoutLeakingRequirement(t *test
 
 func TestContinuousGripDetachesOnlyForReleaseOrSustainedLoss(t *testing.T) {
 	released := attachedTask(t, DefaultConfig())
+	released.environment.state.Phase = PhaseReleaseObject
+	released.environment.state.CarriageX = released.environment.state.TargetX
+	released.environment.state.ObjectX = released.environment.state.TargetX
+	released.environment.state.GripperY = released.environment.targetReleaseGuideHeight()
+	released.environment.state.ObjectY = released.environment.targetRestHeight()
 	if _, err := released.Step(framework.Action{0, 0, -1}); err != nil {
 		t.Fatal(err)
 	}
@@ -1542,6 +1582,8 @@ func TestFullPickAndPlaceRewardIncludesSecureHold(t *testing.T) {
 	config := DefaultConfig()
 	config.Curriculum.Stage = CurriculumFullPickAndPlace
 	task := attachedTask(t, config)
+	// This test covers the post-verification hold signal.
+	task.environment.objectWasLifted = true
 	result, err := task.Step(framework.Action{0, 0, 0})
 	if err != nil {
 		t.Fatal(err)
@@ -2232,7 +2274,7 @@ func TestAttachedTransportAwayFromTargetIsNotProfitable(t *testing.T) {
 	}
 }
 
-func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
+func TestNegativeGripCommandCannotDropDuringTransport(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = true
 	task := attachedTask(t, config)
@@ -2243,11 +2285,11 @@ func TestDropDuringTransportFailsAndPenalizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Done || result.Outcome != OutcomeFailure || result.Reward > float32(task.config.Reward.MidAirDropPenalty) || result.Info["failure_reason_code"] != 8 {
-		t.Fatalf("mid-air transport drop was not penalized: %#v", result)
+	if result.Done || result.Outcome != OutcomeRunning || !task.environment.state.Grip.ObjectAttached || result.Info["object_released"] != 0 {
+		t.Fatalf("negative grip command caused an unsafe transport drop: %#v", result)
 	}
-	if got, want := task.environment.state.Energy, previousEnergy-task.config.Homeostasis.EnergyDecayPerStep-task.config.Homeostasis.UnsafeDropEnergyLoss; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != float32(energyEventUnsafeDrop) {
-		t.Fatalf("unsafe drop energy loss mismatch: got=%v want=%v info=%#v", got, want, result.Info)
+	if got, want := task.environment.state.Energy, previousEnergy-task.config.Homeostasis.EnergyDecayPerStep; math.Abs(got-want) > 1e-9 || result.Info["energy_event_code"] != 0 {
+		t.Fatalf("blocked release should only decay energy: got=%v want=%v info=%#v", got, want, result.Info)
 	}
 }
 
@@ -2343,5 +2385,27 @@ func testPolicyGripRate(task *Task) float32 {
 		return -0.5
 	default:
 		return 0
+	}
+}
+
+func TestLiftPhaseDoesNotSubsidizeStationaryAttachment(t *testing.T) {
+	config := DefaultConfig()
+	config.Homeostasis.Enabled = false
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	config.Reward.TimePenalty = 0
+	environment := newEnvironment(47, config)
+	environment.reset()
+	environment.state.Phase = PhaseLiftObject
+	environment.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	environment.state.GripForce = environment.requiredForce()
+	environment.state.ObjectY = environment.requiredCarryHeight() - 0.20
+	previous := environment.state
+
+	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
+	if reward.Grip != 0 {
+		t.Fatalf("stationary unlifted attachment received hold subsidy")
+	}
+	if reward.LiftStall != -5*config.Reward.LiftStallPenalty {
+		t.Fatalf("stationary unlifted attachment did not receive amplified stall penalty: %v", reward.LiftStall)
 	}
 }

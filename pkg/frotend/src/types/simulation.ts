@@ -1,6 +1,6 @@
 export type RuntimeStatus = 'stopped' | 'running' | 'paused' | 'stalled' | 'resetting' | 'error';
 export type SimulationMode = 'independent' | 'swarm';
-export type ControlMode = 'base_only' | 'residual' | 'pure_rl';
+export type ControlMode = 'base_only' | 'residual' | 'pure_rl' | 'parametric_sac';
 
 export type ObjectStatus =
   | 'idle'

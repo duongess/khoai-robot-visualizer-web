@@ -181,8 +181,14 @@ export const RobotCanvas: React.FC = () => {
       ctx.fillText(`WORKSPACE: ${(workspaceBounds.maxX-workspaceBounds.minX).toFixed(1)}m × ${(workspaceBounds.maxY-workspaceBounds.minY).toFixed(1)}m [BACKEND]`, frameTL.x + 8, frameTL.y + 14);
 
       // 2. Editable 2D Terrain
+      // Use authoritative telemetry terrain points when running so the
+      // canvas immediately reflects per-episode randomized geometry from
+      // the backend instead of a cached initial shape.
+      const terrainPointsLocal = isPaused
+        ? draftConfig.terrain.points
+        : (latestTelemetry?.worker?.terrain?.points ?? cur.terrainPoints);
       drawEditableTerrain({
-        points: isPaused ? draftConfig.terrain.points : cur.terrainPoints,
+        points: terrainPointsLocal,
         transform,
         ctx,
         isPaused,
@@ -199,7 +205,7 @@ export const RobotCanvas: React.FC = () => {
       drawTargetArea({
         targetX: currentTargetX,
         widthM: currentTargetW,
-        terrainPoints: isPaused ? draftConfig.terrain.points : cur.terrainPoints,
+        terrainPoints: terrainPointsLocal,
         transform,
         ctx,
         isPaused,

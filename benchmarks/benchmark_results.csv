@@ -1,0 +1,3 @@
+mode,episodes,successes,success_rate,peak_grip_force,avg_cycle_time_seconds,slip_rate,avg_reward
+pure_rl,60,0,0.000000,17.500000,15.000000,0.026667,-107.087004
+parametric_sac,60,0,0.000000,17.500000,15.000000,0.026667,-107.087004

@@ -38,6 +38,10 @@ func (t *Task) Reset() (framework.State, error) {
 		return nil, errors.New("force-control task is not initialized")
 	}
 	t.environment.reset()
+	minimumSeparation := (t.config.ObjectWidth+t.config.TargetWidth)/2 + t.config.HorizontalTolerance
+	if math.Abs(t.environment.state.TargetX-t.environment.state.ObjectX) < minimumSeparation-1e-9 {
+		return nil, errors.New("workspace cannot fit a non-overlapping object and target")
+	}
 	if err := t.environment.ValidateState(); err != nil {
 		return nil, err
 	}

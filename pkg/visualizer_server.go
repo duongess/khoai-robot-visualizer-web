@@ -63,7 +63,7 @@ func (s *APIServer) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/simulation/resume":
 		s.lifecycle(w, s.runtime.Resume)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/simulation/reset":
-		s.lifecycle(w, s.runtime.Reset)
+		s.resetSimulation(w)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/evaluation/approve":
 		s.approveCurriculumReview(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/model/save":
@@ -86,6 +86,16 @@ func (s *APIServer) lifecycle(w http.ResponseWriter, operation func() error) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *APIServer) resetSimulation(w http.ResponseWriter) {
+	if err := s.runtime.Reset(); err != nil {
+		s.writeError(w, http.StatusConflict, "SIMULATION_STATE", err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok", "runtime_status": s.runtime.Snapshot().Status,
+	})
 }
 
 type curriculumReviewRequest struct {

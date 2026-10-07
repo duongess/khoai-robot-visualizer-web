@@ -159,8 +159,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
   },
 
   resetSimulation: async () => {
-    await runtimeClient.command('/api/simulation/reset');
-    set({ runtimeStatus: 'resetting', selectedEntity: null, isDraggingEntity: false });
+    const response = await runtimeClient.command<{ runtime_status: RuntimeStatus }>('/api/simulation/reset');
+    set({ runtimeStatus: response.runtime_status, selectedEntity: null, isDraggingEntity: false });
   },
 
 	approveCurriculumReview: async () => {

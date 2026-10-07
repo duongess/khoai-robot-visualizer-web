@@ -606,7 +606,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		return State{}, 0, OutcomeRunning, false, err
 	}
 	if e.state.Phase == PhaseSuccess || e.state.Phase == PhaseFailure {
-		return e.state, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
+		return State{}, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
 	}
 
 	baseValues := [3]float64{}
@@ -679,7 +679,6 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	if e.state.GripperVelocityY > 0 {
 		e.verticalAcceleration = math.Max(0, (e.state.GripperVelocityY-previous.GripperVelocityY)/e.config.TimeStep)
 	}
-	e.releaseCommanded = false
 	e.applyGripControl(filteredValues[2])
 	e.lastAppliedAction = filteredValues
 	e.updateGripState()
@@ -896,6 +895,14 @@ func (e *Environment) applyGripControl(value float64) {
 	// opens the jaws, and it is rejected while the gripper is still airborne
 	// above the release guide or before the explicit release phase.
 	// A small negative command means "back off a little", not "drop the object".
+	// Once a valid release has opened the jaws, keep them open while the object
+	// settles. Success requires several stable frames, not repeated release
+	// commands on every one of those frames.
+	if e.releaseCommanded {
+		e.state.GripperOpening = 1
+		e.state.GripForce = 0
+		return
+	}
 	if value <= e.config.ReleaseActionThreshold {
 		if e.state.GripperY > e.targetReleaseGuideHeight()+e.config.ReleaseTolerance || math.Abs(e.state.ObjectX-e.state.TargetX) > e.config.TargetWidth/2+e.config.ReleaseTolerance || e.state.Phase != PhaseReleaseObject || !e.objectHorizontallyInsideTarget() {
 			e.state.GripperOpening = 0
@@ -1722,7 +1729,11 @@ func (e *Environment) slipSeverity() float64 {
 	return clamp((e.requiredForce()-e.state.GripForce)/e.requiredForce(), 0, 1)
 }
 func (e *Environment) objectInsideTarget() bool {
-	return e.objectHorizontallyInsideTarget() && math.Abs(e.state.ObjectY-e.targetRestHeight()) <= e.config.ReleaseTolerance
+	// The target is a horizontal zone over potentially sloped terrain. An
+	// object resting within that zone sits on the ground at its own X, which
+	// can differ from the ground height sampled at the target's center.
+	localRestHeight := e.terrainHeight(e.state.ObjectX) + e.config.ObjectHeight/2
+	return e.objectHorizontallyInsideTarget() && math.Abs(e.state.ObjectY-localRestHeight) <= e.config.ReleaseTolerance
 }
 func (e *Environment) objectHorizontallyInsideTarget() bool {
 	return math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2

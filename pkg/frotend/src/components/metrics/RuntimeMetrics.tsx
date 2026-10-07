@@ -86,7 +86,7 @@ export const RuntimeMetrics: React.FC = () => {
       id: 'metric-success-rate',
       label: 'Success Rate',
       value: `${((r?.success_rate ?? 0.927) * 100).toFixed(1)}%`,
-      subtext: 'Rolling 100 ep',
+      subtext: 'Rolling 50 ep',
       icon: Award,
       color: 'text-emerald-400',
     },

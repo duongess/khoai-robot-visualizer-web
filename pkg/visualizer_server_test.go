@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +14,85 @@ import (
 	"github.com/duongess/khoai-robot-visualizer-web/pkg/forcecontrol"
 	"golang.org/x/net/websocket"
 )
+
+type apiFailOnceTask struct {
+	failOnce   bool
+	resetCount int
+}
+
+func (task *apiFailOnceTask) Reset() (framework.State, error) {
+	task.resetCount++
+	return framework.State{0}, nil
+}
+
+func (task *apiFailOnceTask) Step(framework.Action) (framework.StepResult, error) {
+	if task.failOnce {
+		task.failOnce = false
+		return framework.StepResult{}, errors.New("worker 2 terminal step failed")
+	}
+	return framework.StepResult{State: framework.State{0}, Outcome: framework.OutcomeRunning}, nil
+}
+
+type apiFailOnceFactory struct{ tasks []*apiFailOnceTask }
+
+func (factory *apiFailOnceFactory) Create() (framework.Task, error) {
+	task := &apiFailOnceTask{failOnce: len(factory.tasks) == 1}
+	factory.tasks = append(factory.tasks, task)
+	return task, nil
+}
+
+func TestAPIResetRecoversWorkerErrorWithoutPausingFirst(t *testing.T) {
+	runtime := framework.NewRuntime()
+	factory := &apiFailOnceFactory{}
+	if err := runtime.RegisterTask(framework.TaskRegistration{
+		Descriptor: framework.TaskDescriptor{Name: "api-reset", StateDimension: 1, ActionDimension: 3, ActionMin: -1, ActionMax: 1},
+		Factory:    factory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config := framework.DefaultRuntimeConfig()
+	config.WorkerCount, config.TickInterval, config.RandomActionWarmupTransitions, config.WarmupTransitions = 2, time.Millisecond, 0, 100000
+	if err := runtime.Configure(config, apiTestLearner{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	deadline := time.Now().Add(time.Second)
+	for runtime.Snapshot().Status != framework.RuntimeError && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.Snapshot().Status != framework.RuntimeError {
+		t.Fatal("worker 2 did not enter runtime error state")
+	}
+	server, err := NewAPIServer(runtime, forcecontrol.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/simulation/reset", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("reset response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var resetResponse struct {
+		RuntimeStatus framework.RuntimeStatus `json:"runtime_status"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resetResponse); err != nil || resetResponse.RuntimeStatus != framework.RuntimeRunning {
+		t.Fatalf("reset did not report running status: body=%s err=%v", recorder.Body.String(), err)
+	}
+	if snapshot := runtime.Snapshot(); snapshot.Status != framework.RuntimeRunning || snapshot.LastError != "" {
+		t.Fatalf("reset did not recover worker error: %#v", snapshot)
+	}
+	runtime.Stop()
+	for index, task := range factory.tasks {
+		if task.resetCount < 2 {
+			t.Fatalf("worker %d was not reset after error", index+1)
+		}
+	}
+}
 
 type apiTestLearner struct{}
 

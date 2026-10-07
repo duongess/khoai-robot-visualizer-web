@@ -24,6 +24,7 @@ type Task struct {
 }
 
 var _ framework.Task = (*Task)(nil)
+var _ framework.TerminalTask = (*Task)(nil)
 var _ framework.DecomposedActionTask = (*Task)(nil)
 var _ framework.ReviewableTask = (*Task)(nil)
 var _ framework.TelemetryTask = (*Task)(nil)
@@ -31,6 +32,11 @@ var _ framework.TelemetryTask = (*Task)(nil)
 // NewTask creates an independent force-control task instance.
 func NewTask(seed int64, config Config) *Task {
 	return &Task{environment: newEnvironment(seed, config), config: config}
+}
+
+func (t *Task) IsTerminal() bool {
+	return t != nil && t.environment != nil &&
+		(t.environment.state.Phase == PhaseSuccess || t.environment.state.Phase == PhaseFailure)
 }
 
 func (t *Task) Reset() (framework.State, error) {

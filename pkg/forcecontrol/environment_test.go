@@ -35,6 +35,26 @@ func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
 	}
 }
 
+func TestTerminalEpisodeRequiresResetBeforeAnotherStep(t *testing.T) {
+	task := NewTask(7, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseSuccess
+	if !task.IsTerminal() {
+		t.Fatal("successful episode was not reported as terminal")
+	}
+	if _, err := task.Step(framework.Action{0, 0, 0}); err == nil {
+		t.Fatal("terminal episode accepted another action")
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if task.IsTerminal() {
+		t.Fatal("reset task stayed terminal")
+	}
+}
+
 func TestHomeostasisEnergyDecaysOnceResetsAndStaysObservable(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = true
@@ -814,8 +834,8 @@ func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
 	outside.environment.state.Phase = PhaseReleaseObject
 	outside.environment.state.CarriageX = 1
 	outside.environment.state.ObjectX = 1
-	outside.environment.state.GripperY = outside.environment.targetRestHeight()
-	outside.environment.state.ObjectY = outside.environment.targetRestHeight() - outside.environment.config.ObjectHeight/2
+	outside.environment.state.ObjectY = outside.environment.terrainHeight(1) + outside.environment.config.ObjectHeight/2
+	outside.environment.state.GripperY = outside.environment.objectGripHeight()
 	result, err := outside.Step(framework.Action{0, 0, -1})
 	if err != nil {
 		t.Fatal(err)
@@ -1056,6 +1076,62 @@ func TestReleasedObjectMustStabilizeBeforeSuccess(t *testing.T) {
 	}
 }
 
+func TestAcceptedReleaseRemainsOpenWhileObjectSettles(t *testing.T) {
+	config := DefaultConfig()
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	env := task.environment
+	env.state.Phase = PhaseReleaseObject
+	env.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	env.state.ObjectGrasped = true
+	env.state.CarriageX, env.state.ObjectX = env.state.TargetX, env.state.TargetX
+	env.state.GripperY = env.targetReleaseGuideHeight()
+	env.state.ObjectY = env.targetRestHeight()
+	env.state.ObjectPlaced = true
+	env.wasEverGrasped, env.objectWasLifted = true, true
+
+	first, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil || first.Done || !env.releaseCommanded {
+		t.Fatalf("valid release did not begin settling: result=%#v error=%v", first, err)
+	}
+	for step := 0; step < config.StablePlacementSteps; step++ {
+		// This command reduces force but does not cross the release threshold.
+		// The jaws must stay open after the earlier accepted release.
+		result, err := task.Step(framework.Action{0, 0, -0.769})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if env.state.GripperOpening != 1 || env.state.GripForce != 0 {
+			t.Fatalf("accepted release was undone while settling: state=%#v", env.state)
+		}
+		if result.Done {
+			if result.Outcome != OutcomeSuccess {
+				t.Fatalf("stable placement ended without success: %#v", result)
+			}
+			return
+		}
+	}
+	t.Fatal("stable placement never became successful after an accepted release")
+}
+
+func TestTargetPlacementUsesTerrainHeightAtObjectPosition(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	env := task.environment
+	env.config.Terrain = []TerrainPoint{{X: 0, Y: 0}, {X: 6, Y: 3.6}}
+	env.state.TargetX = 3
+	env.state.TargetY = env.terrainHeight(env.state.TargetX)
+	env.state.ObjectX = 3.3
+	env.state.ObjectY = env.terrainHeight(env.state.ObjectX) + env.config.ObjectHeight/2
+	if !env.objectInsideTarget() {
+		t.Fatalf("object resting on sloped ground inside target was rejected: state=%#v", env.state)
+	}
+}
+
 func TestEmptyGripperAtTargetCannotAttachEarnDeliveryOrSucceed(t *testing.T) {
 	config := DefaultConfig()
 	task := NewTask(1, config)
@@ -1133,12 +1209,12 @@ func TestSustainedInsufficientContactForceIsNotAFreePolicy(t *testing.T) {
 
 func TestGripForceHasBoundedSlewAndReleaseGuard(t *testing.T) {
 	config := DefaultConfig()
-	config.InitialCarriageX = config.InitialObjectX
-	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
 	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 		t.Fatal(err)
 	}
@@ -2453,12 +2529,13 @@ func TestPhaseCannotSkipSecureAttachment(t *testing.T) {
 
 func attachedTask(t *testing.T, config Config) *Task {
 	t.Helper()
-	config.InitialCarriageX = config.InitialObjectX
-	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
+	task.environment.state.Phase = PhaseGripObject
 	for step := 0; step < 30 && !task.environment.state.Grip.ObjectAttached; step++ {
 		if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 			t.Fatalf("could not establish valid attachment: state=%#v err=%v", task.environment.state.Grip, err)

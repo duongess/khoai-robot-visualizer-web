@@ -203,7 +203,7 @@ export const PhysicsMetrics: React.FC = () => {
 		  </div>
 
 		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
-			<div className="text-[10px] text-slate-400">{controlMode === 'parametric_sac' ? 'Parametric SAC (SAC θ → f(x; θ) → applied)' : residualEnabled ? 'Neural Composition (fly base + α × SAC residual → final)' : controlMode === 'base_only' ? 'Fly Connectome Base (base → applied)' : 'Pure SAC Action (action → applied)'}</div>
+			<div className="text-[10px] text-slate-400">{controlMode === 'parametric_sac' ? 'SAC + Não ruồi + f(x; θ) → applied' : controlMode === 'pure_rl' ? 'SAC + f(x) → applied' : residualEnabled ? 'Residual script prior (base + α × SAC residual → final)' : controlMode === 'base_only' ? 'Fly connectome base (base → applied)' : 'Pure SAC action (action → applied)'}</div>
 			<div className="font-mono text-[10px] text-slate-200 mt-0.5">
 			  {residualEnabled
 				? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} + α·{(residualAction?.horizontal ?? 0).toFixed(3)} → {(finalAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} + α·{(residualAction?.vertical ?? 0).toFixed(3)} → {(finalAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.gripper ?? 0).toFixed(3)} + α·{(residualAction?.gripper ?? 0).toFixed(3)} → {(finalAction?.gripper ?? 0).toFixed(3)} · applied {(appliedAction?.gripper ?? 0).toFixed(3)}</>

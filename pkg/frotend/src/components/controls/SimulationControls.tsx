@@ -188,10 +188,10 @@ export const SimulationControls: React.FC = () => {
 			<div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 p-1 rounded-lg">
 				<span className="text-xs text-slate-400 px-2 font-mono">Control:</span>
 				{([
-					['base_only', 'Base only'],
-					['residual', 'Residual'],
-					['pure_rl', 'Pure RL'],
-					['parametric_sac', 'Parametric SAC'],
+					['pure_rl', 'SAC + f(x)'],
+					['parametric_sac', 'SAC + Não ruồi + f(x)'],
+					['residual', 'Residual prior'],
+					['base_only', 'Fly connectome only'],
 				] as const).map(([mode, label]) => (
 					<button
 						key={mode}

@@ -21,7 +21,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	learner, err := framework.NewLearnerClient(ctx)
+	learnerConfig := framework.DefaultConfig()
+	if value := os.Getenv("KHOAI_LEARNER_ADDRESS"); value != "" {
+		learnerConfig.Address = value
+	}
+	learner, err := framework.NewLearnerClientWithConfig(ctx, learnerConfig)
 	if err != nil {
 		log.Fatalf("connect to learner: %v", err)
 	}

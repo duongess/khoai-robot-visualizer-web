@@ -86,7 +86,9 @@ export const RuntimeMetrics: React.FC = () => {
       id: 'metric-success-rate',
       label: 'Success Rate',
       value: `${((r?.success_rate ?? 0.927) * 100).toFixed(1)}%`,
-      subtext: 'Rolling 50 ep',
+      subtext: r && r.total_episodes < 1000
+        ? `${r.total_episodes.toLocaleString()}/1,000 ep observed`
+        : 'Rolling 1,000 ep',
       icon: Award,
       color: 'text-emerald-400',
     },

@@ -152,7 +152,7 @@ export const ChartsPanel: React.FC = () => {
           <div className="flex items-center justify-between text-xs font-mono text-slate-300 mb-2">
             <div className="flex items-center gap-1.5 font-semibold text-cyan-400">
               <Award className="w-3.5 h-3.5" />
-              <span>Rolling Success Rate</span>
+              <span>Rolling Success Rate (1,000 ep)</span>
             </div>
             <span className="text-[10px] text-slate-500">X: Steps | Y: %</span>
           </div>

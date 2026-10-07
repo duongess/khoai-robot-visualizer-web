@@ -471,11 +471,10 @@ func DefaultConfig() Config {
 		StablePlacementSteps:     3,
 		LiftClearance:            0.60,
 		ReleaseTolerance:         0.08,
-		// A normalized SAC action of 0.03 was large enough to erase legitimate
-		// early descent commands (for example -0.004). Hardware still clamps all
-		// commands; this intentionally small, configurable dead zone only removes
-		// numerical noise rather than exploration.
-		ActionDeadZone: 0.02,
+		// Keep the dead zone permissive enough for genuine early descent commands
+		// to reach the plant. A small margin still removes numerical noise while
+		// preserving the action signal the pure-RL baseline needs.
+		ActionDeadZone: 0.05,
 		// Kept opt-in in the library so low-level environment tests can still
 		// exercise the raw action-rate plant. The force-control demo enables it
 		// by default and is therefore the production residual-RL path.

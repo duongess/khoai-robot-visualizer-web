@@ -592,11 +592,13 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
 	if decompositionAvailable {
 		switch e.config.EffectiveControlMode() {
-		case ModeBaseOnly, ModeParametricSAC:
+		case ModeBaseOnly:
 			selected = baseValues
-		case ModePureRL:
-			selected = residualValues
-		case ModeResidual:
+		case ModeResidual, ModePureRL, ModeParametricSAC:
+			// True Parametric SAC / pure-RL control must execute the evaluated
+			// controller action f(x; theta) rather than the raw residual branch.
+			// The residual stream remains available for diagnostics, but it is not
+			// the actuator command for these modes.
 			selected = finalValues
 		}
 	}
@@ -668,8 +670,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
 		e.updateHomeostasis(terminalReason)
 		rewardAction := filteredValues
-		if mode == ModeResidual {
-			rewardAction = residualValues
+		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
+			rewardAction = finalValues
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
@@ -680,8 +682,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	e.updateHomeostasis("")
 	if e.state.Phase == PhaseSuccess {
 		rewardAction := filteredValues
-		if mode == ModeResidual {
-			rewardAction = residualValues
+		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
+			rewardAction = finalValues
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		if !e.successRewardAwarded {
@@ -718,8 +720,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
 	rewardAction := filteredValues
-	if mode == ModeResidual {
-		rewardAction = residualValues
+	if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
+		rewardAction = finalValues
 	}
 	e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
@@ -1155,6 +1157,9 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	// Time cost is always present. Homeostasis is an additional motivation
 	// signal, not a replacement that can make hovering cost-free.
 	breakdown.Penalty = e.config.Reward.TimePenalty
+	// Dense shaping keeps the agent moving toward the object instead of parking
+	// at the ceiling with a near-zero action and collecting idle step penalties.
+	breakdown.Penalty -= 0.5 * gripperObjectDistance(e.state)
 	attached := e.state.Grip.ObjectAttached
 	stage := e.currentCurriculumStage()
 	if e.state.Grip.ContactDetected && !e.state.ContactBonusAwarded {

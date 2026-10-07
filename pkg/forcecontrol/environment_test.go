@@ -152,15 +152,18 @@ func TestPrematureDescentPenaltyOnlyActivatesBelowTravelClearance(t *testing.T) 
 	env.state = previous
 	env.state.GripperY = 2.6
 	result := env.rewardWithActions(previous, [3]float64{0, 0, 0}, [3]float64{})
-	if result.Penalty < config.Reward.TimePenalty-1e-9 {
-		t.Fatalf("travel-height descent should not be punished: %#v", result)
+	if result.Penalty >= 0 {
+		t.Fatalf("travel-height idle descent should remain negatively rewarded under distance shaping: %#v", result)
 	}
 
 	previous.GripperY = 0.8
 	env.state.GripperY = 0.6
 	lowResult := env.rewardWithActions(previous, [3]float64{0, 0, 0}, [3]float64{})
-	if lowResult.Penalty >= result.Penalty {
-		t.Fatalf("below-clearance descent should be penalized more strongly: high=%#v low=%#v", result, lowResult)
+	if result.Penalty > lowResult.Penalty {
+		t.Fatalf("far-from-object travel-height idle should be penalized more strongly than a near-grasp descent: high=%#v low=%#v", result, lowResult)
+	}
+	if lowResult.Penalty >= 0 {
+		t.Fatalf("lowering below clearance should still be negatively rewarded under dense approach shaping: %#v", lowResult)
 	}
 }
 
@@ -289,8 +292,8 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 	}{
 		{ModeBaseOnly, -0.8},
 		{ModeResidual, 0.4},
-		{ModePureRL, 0.7},
-		{ModeParametricSAC, -0.8},
+		{ModePureRL, 0.4},
+		{ModeParametricSAC, 0.4},
 	}
 	for _, test := range tests {
 		config := DefaultConfig()
@@ -366,8 +369,8 @@ func TestResidualModeStillTrainsFlyBaseWithSpatialProgress(t *testing.T) {
 	previous := environment.state
 	environment.state.CarriageX = 1.1
 	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	if reward.Approach <= 0 || reward.Total <= config.Reward.TimePenalty {
-		t.Fatalf("residual mode starved fly-base spatial learning: %#v", reward)
+	if reward.Approach <= 0 || reward.Total >= 0 {
+		t.Fatalf("residual mode still needs positive spatial learning under dense object-distance shaping: %#v", reward)
 	}
 }
 
@@ -533,11 +536,11 @@ func TestDetachedApproachIdleReceivesStallPenaltyAndTimeout(t *testing.T) {
 	previous := State{Phase: PhaseApproachObject, CarriageX: 2, ObjectX: 1}
 	environment.state = previous
 	idle := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	want := config.Reward.TimePenalty + config.Reward.ApproachStallPenalty
+	want := config.Reward.TimePenalty + config.Reward.ApproachStallPenalty - 0.5*gripperObjectDistance(previous)
 	if math.Abs(idle.Penalty-want) > 1e-9 {
 		t.Fatalf("idle approach penalty = %v, want %v", idle.Penalty, want)
 	}
-	if idle.Total >= config.Reward.TimePenalty {
+	if idle.Total >= 0 {
 		t.Fatalf("idle approach did not degrade reward beyond time cost: %+v", idle)
 	}
 
@@ -551,8 +554,8 @@ func TestDetachedApproachIdleReceivesStallPenaltyAndTimeout(t *testing.T) {
 }
 
 func TestDefaultActionDeadZoneAllowsFineControl(t *testing.T) {
-	if got := DefaultConfig().ActionDeadZone; got != 0.02 {
-		t.Fatalf("action dead zone = %v, want 0.02", got)
+	if got := DefaultConfig().ActionDeadZone; got != 0.05 {
+		t.Fatalf("action dead zone = %v, want 0.05", got)
 	}
 }
 

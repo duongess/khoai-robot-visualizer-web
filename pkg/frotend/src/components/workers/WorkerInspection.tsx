@@ -68,11 +68,9 @@ export const WorkerInspection: React.FC = () => {
         </div>
 
         <div className="bg-slate-950/70 border border-slate-800/80 p-2 rounded">
-          <span className="text-[10px] text-slate-400 block">{worker?.control?.residual_enabled ? 'Fly Base + α × SAC Residual → Final' : 'Selected → Applied Grip'}</span>
+          <span className="text-[10px] text-slate-400 block">Python f(x; θ) → Applied Grip</span>
           <span className="font-bold text-purple-300">
-            {worker?.control?.residual_enabled
-              ? `${(worker.control.base_action?.gripper ?? 0).toFixed(3)} + α·${(worker.control.residual_action?.gripper ?? 0).toFixed(3)} → ${(worker.control.final_action?.gripper ?? 0).toFixed(3)}`
-              : <>{worker?.last_action.force_rate_command?.toFixed(3) ?? worker?.last_action.normalized_grip_force ?? 0} → {worker?.last_action.filtered_gripper?.toFixed(3) ?? 0}</>}
+            {(worker?.control?.final_action?.gripper ?? worker?.last_action.gripper ?? 0).toFixed(3)} → {(worker?.control?.applied_action?.gripper ?? worker?.last_action.filtered_gripper ?? 0).toFixed(3)}
           </span>
         </div>
 
@@ -94,8 +92,8 @@ export const WorkerInspection: React.FC = () => {
         </div>
 
         <div className="bg-slate-950/70 border border-slate-800/80 p-2 rounded">
-          <span className="text-[10px] text-slate-400 block">Episode Policy</span>
-          <span className="font-bold text-cyan-300">v{worker?.episode_policy_version ?? runtime?.policy_version ?? 0}</span>
+          <span className="text-[10px] text-slate-400 block">Active Learner Policy</span>
+          <span className="font-bold text-cyan-300">{runtime?.active_model_name ?? 'Unknown'} · v{worker?.episode_policy_version ?? runtime?.policy_version ?? 0}</span>
         </div>
       </div>
     </div>

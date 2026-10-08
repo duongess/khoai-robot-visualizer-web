@@ -50,12 +50,12 @@ export const PhysicsMetrics: React.FC = () => {
 	const forceRateCommand = worker?.last_action.force_rate_command ?? 0;
 	const forceRateNewtonPerSecond = worker?.last_action.force_rate_newtons_per_second ?? 0;
 	const forceActionMode = worker?.last_action.force_action_mode ?? 'hold';
-	const controlMode = worker?.control?.control_mode ?? 'pure_rl';
-	const residualEnabled = controlMode === 'residual';
-	const baseAction = worker?.control?.base_action;
-	const residualAction = worker?.control?.residual_action;
 	const finalAction = worker?.control?.final_action;
 	const appliedAction = worker?.control?.applied_action;
+	const activeModelName = runtime?.active_model_name ?? 'Learner model';
+	const controllerType = runtime?.controller_type ?? 'unknown';
+	const checkpointName = runtime?.checkpoint_name ?? 'unsaved';
+	const reflexParameters = worker?.reflex_parameters ?? [];
   const mass = obj?.mass ?? draftConfig.object.mass;
   const friction = obj?.friction ?? draftConfig.object.friction;
   const objectStatus = obj?.status ?? 'idle';
@@ -202,15 +202,13 @@ export const PhysicsMetrics: React.FC = () => {
 			</>}
 		  </div>
 
-		  <div className="col-span-2 bg-slate-950/60 border border-slate-800/80 p-2 rounded">
-			<div className="text-[10px] text-slate-400">{controlMode === 'parametric_sac' ? 'SAC + Não ruồi + f(x; θ) → applied' : controlMode === 'pure_rl' ? 'SAC + f(x) → applied' : residualEnabled ? 'Residual script prior (base + α × SAC residual → final)' : controlMode === 'base_only' ? 'Fly connectome base (base → applied)' : 'Pure SAC action (action → applied)'}</div>
+		  <div className="col-span-2 bg-slate-950/60 border border-cyan-500/20 p-2 rounded">
+			<div className="text-[10px] text-cyan-300">Model: {activeModelName} · Python f(x; θ) → Go actuators</div>
 			<div className="font-mono text-[10px] text-slate-200 mt-0.5">
-			  {residualEnabled
-				? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} + α·{(residualAction?.horizontal ?? 0).toFixed(3)} → {(finalAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} + α·{(residualAction?.vertical ?? 0).toFixed(3)} → {(finalAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.gripper ?? 0).toFixed(3)} + α·{(residualAction?.gripper ?? 0).toFixed(3)} → {(finalAction?.gripper ?? 0).toFixed(3)} · applied {(appliedAction?.gripper ?? 0).toFixed(3)}</>
-				: controlMode === 'base_only' || controlMode === 'parametric_sac'
-					? <>x {(baseAction?.horizontal ?? 0).toFixed(3)} · y {(baseAction?.vertical ?? 0).toFixed(3)} · grip {(baseAction?.gripper ?? 0).toFixed(3)} · applied {(appliedAction?.horizontal ?? 0).toFixed(3)}, {(appliedAction?.vertical ?? 0).toFixed(3)}, {(appliedAction?.gripper ?? 0).toFixed(3)}</>
-				: <>x {(worker?.last_action.horizontal ?? 0).toFixed(3)} → {(worker?.last_action.filtered_horizontal ?? 0).toFixed(3)} · y {(worker?.last_action.vertical ?? 0).toFixed(3)} → {(worker?.last_action.filtered_vertical ?? 0).toFixed(3)} · grip {(worker?.last_action.gripper ?? 0).toFixed(3)} → {(worker?.last_action.filtered_gripper ?? 0).toFixed(3)}</>}
+			  x {(finalAction?.horizontal ?? worker?.last_action.horizontal ?? 0).toFixed(3)} → {(appliedAction?.horizontal ?? worker?.last_action.filtered_horizontal ?? 0).toFixed(3)} · y {(finalAction?.vertical ?? worker?.last_action.vertical ?? 0).toFixed(3)} → {(appliedAction?.vertical ?? worker?.last_action.filtered_vertical ?? 0).toFixed(3)} · grip {(finalAction?.gripper ?? worker?.last_action.gripper ?? 0).toFixed(3)} → {(appliedAction?.gripper ?? worker?.last_action.filtered_gripper ?? 0).toFixed(3)}
 			</div>
+			<div className="mt-1 text-[9px] font-mono text-slate-500">controller: {controllerType} · checkpoint: {checkpointName}</div>
+			{reflexParameters.length > 0 && <div className="mt-1 text-[9px] font-mono text-violet-300">θ (bounded): {reflexParameters.map((parameter) => `${parameter.name}=${parameter.value.toFixed(3)} [${parameter.min_value.toFixed(1)}, ${parameter.max_value.toFixed(1)}]`).join(' · ')}</div>}
 		  </div>
         </div>
 

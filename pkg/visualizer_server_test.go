@@ -127,13 +127,21 @@ func (apiTestLearner) HealthCheck(context.Context) (framework.HealthStatus, erro
 }
 func (apiTestLearner) PredictBatch(_ context.Context, states []framework.State, policyVersion uint64) (framework.PredictionResult, error) {
 	actions := make([]framework.Action, len(states))
+	values := make([]float32, len(states))
 	for i := range actions {
 		actions[i] = framework.Action{0, 0, -1}
+		values[i] = -0.75
 	}
 	if policyVersion == 0 {
 		policyVersion = 1
 	}
-	return framework.PredictionResult{Actions: actions, PolicyVersion: policyVersion}, nil
+	return framework.PredictionResult{
+		Actions: actions,
+		ReflexParameters: []framework.ReflexParameter{{
+			Name: "channel_1.a", Values: values, MinValue: -1, MaxValue: 1, DefaultValue: -0.5,
+		}},
+		PolicyVersion: policyVersion,
+	}, nil
 }
 func (apiTestLearner) TrainBatch(context.Context, []framework.Transition) (framework.TrainingResult, error) {
 	return framework.TrainingResult{}, nil
@@ -187,6 +195,14 @@ func TestAPIServerRejectsRunningSceneUpdatesAndPublishesTelemetry(t *testing.T) 
 	}
 	if workerTelemetry["contact_detected"] == nil || workerTelemetry["object_attached"] == nil || workerTelemetry["delivery_reward"] == nil {
 		t.Fatalf("telemetry lacks secure-grasp diagnostics: %#v", workerTelemetry)
+	}
+	parameters := workerTelemetry["reflex_parameters"].([]framework.ReflexParameterValue)
+	if len(parameters) != 1 || parameters[0].Name != "channel_1.a" || parameters[0].Value != -0.75 {
+		t.Fatalf("telemetry lacks learner reflex parameters: %#v", workerTelemetry["reflex_parameters"])
+	}
+	control := workerTelemetry["control"].(map[string]any)
+	if control["command_source"] != "python_evaluated_reflex" || control["model_managed"] != true {
+		t.Fatalf("telemetry does not identify the learner-authoritative command: %#v", control)
 	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, "/api/scene", nil)

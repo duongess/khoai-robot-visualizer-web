@@ -244,7 +244,16 @@ export interface WorkerState {
   outcome: string;
   latest_vertical_action?: number;
 	episode_policy_version?: number;
+	reflex_parameters?: Array<{
+		name: string;
+		value: number;
+		min_value: number;
+		max_value: number;
+		default_value: number;
+	}>;
 	control?: {
+		command_source?: 'python_evaluated_reflex';
+		model_managed?: boolean;
 		dt: number;
 		carriage_x: number;
 		gripper_y: number;

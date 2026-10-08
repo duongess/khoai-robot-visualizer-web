@@ -616,6 +616,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 			return State{}, 0, OutcomeRunning, false, fmt.Errorf("fly base action: %w", err)
 		}
 	}
+	// Preserve the legacy diagnostic value when an older caller has no explicit
+	// decomposition. It is never used to select the physical command.
 	residualValues := finalValues
 	if len(residual) > 0 {
 		residualValues, err = e.actionVector(residual)
@@ -623,28 +625,11 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 			return State{}, 0, OutcomeRunning, false, fmt.Errorf("SAC residual action: %w", err)
 		}
 	}
-	selected := finalValues
-	// A caller that supplies only the legacy/final action has no branches to
-	// select. Execute that action in every mode instead of treating a missing
-	// base or residual vector as an all-zero command.
-	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
-	if decompositionAvailable {
-		// The wire streams have model-specific ownership. Dense parametric MLP
-		// publishes f(x; theta) as the residual stream; connectome Parametric SAC
-		// publishes it as the fly-base stream. Residual composition alone consumes
-		// the pre-composed final stream.
-		switch e.config.EffectiveControlMode() {
-		case ModeBaseOnly, ModeParametricSAC:
-			selected = baseValues
-		case ModePureRL:
-			selected = residualValues
-		case ModeResidual:
-			selected = finalValues
-		default:
-			selected = finalValues
-		}
-	}
-	values, err := e.validatedAction(float32Action(selected))
+	// Python owns policy selection and returns the evaluated actuator command in
+	// the primary action stream. The decomposition streams remain telemetry for
+	// experiment analysis only; the Go process must never select or recombine
+	// them in response to a dashboard control.
+	values, err := e.validatedAction(float32Action(finalValues))
 	if err != nil {
 		return State{}, 0, OutcomeRunning, false, err
 	}
@@ -712,7 +697,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		e.updateHomeostasis(terminalReason)
 		rewardAction := filteredValues
 		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
-			rewardAction = selected
+			rewardAction = finalValues
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
@@ -724,7 +709,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	if e.state.Phase == PhaseSuccess {
 		rewardAction := filteredValues
 		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
-			rewardAction = selected
+			rewardAction = finalValues
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		if !e.successRewardAwarded {
@@ -734,9 +719,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 				e.lastReward.Total += e.lastReward.Contact
 			case CurriculumGrasp:
 				// Legacy direct-force training already receives its attachment
-				// event reward. Residual mode instead keeps that feedback small
-				// and awards this clean terminal grasp milestone after the
-				// configured verified hold.
+				// event reward. The primary-action pipeline still preserves this
+				// task-specific reward distinction for historical checkpoints.
 				if e.config.EffectiveControlMode() == ModeResidual {
 					e.lastReward.Success = e.config.Reward.SuccessfulGripReward
 					e.lastReward.Total += e.lastReward.Success
@@ -762,7 +746,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	}
 	rewardAction := filteredValues
 	if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
-		rewardAction = selected
+		rewardAction = finalValues
 	}
 	e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil

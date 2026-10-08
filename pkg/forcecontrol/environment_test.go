@@ -305,19 +305,11 @@ func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
 	}
 }
 
-func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *testing.T) {
-	tests := []struct {
-		mode ControlMode
-		want float32
-	}{
-		{ModeBaseOnly, -0.8},
-		{ModeResidual, 0.4},
-		{ModePureRL, 0.7},
-		{ModeParametricSAC, -0.8},
-	}
+func TestPrimaryPythonActionWinsOverDecompositionInEveryLegacyMode(t *testing.T) {
+	tests := []ControlMode{ModeBaseOnly, ModeResidual, ModePureRL, ModeParametricSAC}
 	for _, test := range tests {
 		config := DefaultConfig()
-		config.ControlMode = test.mode
+		config.ControlMode = test
 		config.Homeostasis.Enabled = false
 		task := NewTask(71, config)
 		if _, err := task.Reset(); err != nil {
@@ -330,21 +322,22 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 			framework.Action{0.7, 0, 0},
 		)
 		if err != nil {
-			t.Fatalf("mode %s: %v", test.mode, err)
+			t.Fatalf("mode %s: %v", test, err)
 		}
-		if math.Abs(float64(result.AppliedAction[0])-float64(test.want)*config.ActionSmoothingAlpha) > 1e-5 {
-			t.Fatalf("mode %s applied %v; branch selection is wrong", test.mode, result.AppliedAction)
+		const primary = float32(0.4)
+		if math.Abs(float64(result.AppliedAction[0])-float64(primary)*config.ActionSmoothingAlpha) > 1e-5 {
+			t.Fatalf("mode %s applied %v; primary action was overridden", test, result.AppliedAction)
 		}
-		if test.want != 0 && task.environment.state.CarriageX == initialX {
-			t.Fatalf("mode %s did not apply selected neural command", test.mode)
+		if task.environment.state.CarriageX == initialX {
+			t.Fatalf("mode %s did not apply the primary neural command", test)
 		}
 		if result.Info["base_action_horizontal"] != -0.8 || result.Info["residual_action_horizontal"] != 0.7 || result.Info["final_action_horizontal"] != 0.4 {
-			t.Fatalf("mode %s lost dual-loop decomposition: %#v", test.mode, result.Info)
+			t.Fatalf("mode %s lost diagnostic decomposition: %#v", test, result.Info)
 		}
 	}
 }
 
-func TestPureRLAppliesDenseParametricResidualToVerticalAndGripChannels(t *testing.T) {
+func TestPrimaryParametricActionDrivesVerticalAndGripChannels(t *testing.T) {
 	config := DefaultConfig()
 	config.ControlMode = ModePureRL
 	config.Homeostasis.Enabled = false
@@ -353,24 +346,24 @@ func TestPureRLAppliesDenseParametricResidualToVerticalAndGripChannels(t *testin
 		t.Fatal(err)
 	}
 	initialY := task.environment.state.GripperY
-	residual := framework.Action{0.021, -0.996, 1.0}
+	primary := framework.Action{0.021, -0.996, 1.0}
 	result, err := task.StepDecomposed(
+		primary,
 		framework.Action{0, 0, 0},
 		framework.Action{0, 0, 0},
-		residual,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if task.environment.state.GripperY >= initialY {
-		t.Fatalf("pure_rl did not descend from y=%v: state=%#v", initialY, task.environment.state)
+		t.Fatalf("primary parametric action did not descend from y=%v: state=%#v", initialY, task.environment.state)
 	}
 	if result.AppliedAction[1] >= 0 || result.AppliedAction[2] <= 0 {
-		t.Fatalf("pure_rl did not apply residual y/grip channels: applied=%v", result.AppliedAction)
+		t.Fatalf("primary parametric action did not apply y/grip channels: applied=%v", result.AppliedAction)
 	}
-	if math.Abs(float64(result.AppliedAction[1])-float64(residual[1])*config.ActionSmoothingAlpha) > 1e-5 ||
-		math.Abs(float64(result.AppliedAction[2])-float64(residual[2])) > 1e-5 {
-		t.Fatalf("pure_rl residual was not passed through the physical filter: applied=%v residual=%v", result.AppliedAction, residual)
+	if math.Abs(float64(result.AppliedAction[1])-float64(primary[1])*config.ActionSmoothingAlpha) > 1e-5 ||
+		math.Abs(float64(result.AppliedAction[2])-float64(primary[2])) > 1e-5 {
+		t.Fatalf("primary parametric action was not passed through the physical filter: applied=%v primary=%v", result.AppliedAction, primary)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -40,30 +39,9 @@ func main() {
 
 	runtime := framework.NewRuntime()
 	config := forcecontrol.DefaultConfig()
-	// The demo defaults to residual control. The runtime API can switch among
-	// base-only, residual, and pure-RL without restarting this process.
-	config.Residual.Enabled = true
-	config.ControlMode = forcecontrol.ModeResidual
-	if value := os.Getenv("FORCE_CONTROL_CONTROL_MODE"); value != "" {
-		config.ControlMode = forcecontrol.ControlMode(value)
-		if !config.ControlMode.Valid() {
-			log.Fatalf("parse FORCE_CONTROL_CONTROL_MODE: want base_only, residual, or pure_rl; got %q", value)
-		}
-	}
-	if value := os.Getenv("FORCE_CONTROL_RESIDUAL_CONTROL"); value != "" {
-		enabled, parseErr := strconv.ParseBool(value)
-		if parseErr != nil {
-			log.Fatalf("parse FORCE_CONTROL_RESIDUAL_CONTROL: %v", parseErr)
-		}
-		config.Residual.Enabled = enabled
-		if os.Getenv("FORCE_CONTROL_CONTROL_MODE") == "" {
-			if enabled {
-				config.ControlMode = forcecontrol.ModeResidual
-			} else {
-				config.ControlMode = forcecontrol.ModePureRL
-			}
-		}
-	}
+	// The Python learner selects the actor at process startup. Go consumes only
+	// its primary evaluated command, so there is deliberately no model/control
+	// mode environment override or runtime switch here.
 	if stage := os.Getenv("FORCE_CONTROL_CURRICULUM"); stage != "" {
 		config.Curriculum.Stage = forcecontrol.CurriculumStage(stage)
 		// An explicitly selected curriculum is a training distribution, including
@@ -76,15 +54,13 @@ func main() {
 	}
 	runtimeConfig := framework.DefaultRuntimeConfig()
 	runtimeConfig.WorkerCount = 2
-	// Dual-loop modes require the learner's fly-base decomposition from the
-	// first step. Exploration still comes from the stochastic SAC residual head;
-	// framework-generated random actions have no corresponding fly-base vector.
+	// All live commands come from the learner's primary action stream.
 	runtimeConfig.RandomActionWarmupTransitions = 0
 
 	if err := runtime.Configure(runtimeConfig, learner); err != nil {
 		log.Fatalf("configure runtime: %v", err)
 	}
-	api, err := pkg.NewAPIServer(runtime, config)
+	api, err := pkg.NewAPIServer(runtime, config, health)
 	if err != nil {
 		log.Fatalf("initialize API server: %v", err)
 	}

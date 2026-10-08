@@ -94,6 +94,32 @@ func TestAPIResetRecoversWorkerErrorWithoutPausingFirst(t *testing.T) {
 	}
 }
 
+func TestAPIServerPublishesLearnerModelAndRejectsControlModeChanges(t *testing.T) {
+	runtime := framework.NewRuntime()
+	server, err := NewAPIServer(runtime, forcecontrol.DefaultConfig(), framework.HealthStatus{
+		ControllerType:  "parametric_mlp",
+		ActiveModelName: "Parametric MLP (Dense)",
+		ModelName:       "parametric_mlp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthRecorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(healthRecorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if healthRecorder.Code != http.StatusOK || !bytes.Contains(healthRecorder.Body.Bytes(), []byte("Parametric MLP (Dense)")) {
+		t.Fatalf("health response does not identify active learner: status=%d body=%s", healthRecorder.Code, healthRecorder.Body.String())
+	}
+	telemetry := server.telemetry()
+	if telemetry["runtime"].(map[string]any)["active_model_name"] != "Parametric MLP (Dense)" {
+		t.Fatalf("telemetry did not publish active learner identity: %#v", telemetry)
+	}
+	modeRecorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(modeRecorder, httptest.NewRequest(http.MethodPost, "/api/control-mode", bytes.NewBufferString(`{"control_mode":"fly_connectome"}`)))
+	if modeRecorder.Code != http.StatusMethodNotAllowed || !bytes.Contains(modeRecorder.Body.Bytes(), []byte("MODEL_MANAGED_BY_LEARNER")) {
+		t.Fatalf("control-mode endpoint must be disabled: status=%d body=%s", modeRecorder.Code, modeRecorder.Body.String())
+	}
+}
+
 type apiTestLearner struct{}
 
 func (apiTestLearner) HealthCheck(context.Context) (framework.HealthStatus, error) {

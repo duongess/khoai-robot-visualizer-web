@@ -124,6 +124,9 @@ export interface RuntimeMetrics {
   replay_buffer_size: number;
   training_batches: number;
   policy_version: number;
+	active_model_name?: string;
+	controller_type?: string;
+	checkpoint_name?: string;
 	training_step?: number;
 	total_episodes?: number;
 	actor_loss?: number;

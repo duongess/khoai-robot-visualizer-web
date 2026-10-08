@@ -13,6 +13,11 @@ import { runtimeClient } from './runtime-client';
 import { updateSceneApi } from './simulation-api';
 import { DEFAULT_FLAT_TERRAIN_POINTS } from '../components/simulation/editable-terrain';
 import { getTerrainHeightAt } from '../components/simulation/coordinate-system';
+import {
+  appendTelemetrySample,
+  loadTelemetryHistory,
+  saveTelemetryHistory,
+} from './telemetry-history';
 
 export type SelectedEntityType = 'object' | 'carriage' | 'gripper' | 'terrain_point' | 'target' | null;
 
@@ -79,15 +84,13 @@ export interface SimulationStore {
   setActiveTab: (tab: 'simulation' | 'comparison') => void;
 }
 
-const MAX_HISTORY = 600;
-
 export const useSimulationStore = create<SimulationStore>((set, get) => ({
   runtimeStatus: 'running',
   selectedWorkerId: 1,
   selectedMode: 'swarm',
   webSocketStatus: 'disconnected',
   latestTelemetry: null,
-  telemetryHistory: [],
+  telemetryHistory: loadTelemetryHistory(),
   showVectors: true,
   activeTab: 'simulation',
 
@@ -109,8 +112,9 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
     const gripForce = snapshot.worker.gantry?.grip_force ?? snapshot.worker.robot?.grip_force ?? 0;
 
     const newSample: ChartSample = {
-      timestamp: Date.now(),
-      step: snapshot.worker.episode_step,
+      timestamp: Number.isFinite(Date.parse(snapshot.timestamp)) ? Date.parse(snapshot.timestamp) : Date.now(),
+      episode_id: snapshot.worker.episode_id,
+      episode_step: snapshot.worker.episode_step,
       total_steps: snapshot.runtime.total_steps,
       average_reward: snapshot.runtime.average_reward,
       success_rate: snapshot.runtime.success_rate,
@@ -120,10 +124,8 @@ export const useSimulationStore = create<SimulationStore>((set, get) => ({
       break_force: snapshot.worker.object.break_force,
     };
 
-    const updatedHistory = [...prevHistory, newSample];
-    if (updatedHistory.length > MAX_HISTORY) {
-      updatedHistory.splice(0, updatedHistory.length - MAX_HISTORY);
-    }
+    const updatedHistory = appendTelemetrySample(prevHistory, newSample);
+    saveTelemetryHistory(updatedHistory);
 
     set({
       latestTelemetry: snapshot,

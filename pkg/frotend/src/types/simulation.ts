@@ -309,7 +309,8 @@ export interface SimulationSnapshot {
 
 export interface ChartSample {
   timestamp: number;
-  step: number;
+  episode_id: number;
+  episode_step: number;
   total_steps: number;
   average_reward: number;
   success_rate: number;

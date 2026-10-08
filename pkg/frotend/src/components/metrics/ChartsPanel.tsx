@@ -1,10 +1,14 @@
 import React from 'react';
 import { useSimulationStore } from '../../lib/simulation-store';
-import { ChartSample } from '../../types/simulation';
 import { TrendingUp, Award, Zap, ShieldAlert } from 'lucide-react';
 
+interface ChartPoint {
+  x: number;
+  value: number;
+}
+
 interface MiniLineChartProps {
-  data: number[];
+  data: ChartPoint[];
   color: string;
   min?: number;
   max?: number;
@@ -33,7 +37,7 @@ const MiniLineChart: React.FC<MiniLineChartProps> = ({
   // Downsample if more than 80 points to keep SVG ultra performant
   const sampleCount = 60;
   const step = Math.max(1, Math.floor(data.length / sampleCount));
-  const points: number[] = [];
+  const points: ChartPoint[] = [];
   for (let i = 0; i < data.length; i += step) {
     points.push(data[i]);
   }
@@ -41,24 +45,28 @@ const MiniLineChart: React.FC<MiniLineChartProps> = ({
     points.push(data[data.length - 1]);
   }
 
-  const computedMin = min !== undefined ? min : Math.min(...points);
-  const computedMax = max !== undefined ? max : Math.max(...points);
+  const values = points.map((point) => point.value);
+  const computedMin = min !== undefined ? min : Math.min(...values);
+  const computedMax = max !== undefined ? max : Math.max(...values);
   const range = computedMax - computedMin === 0 ? 1 : computedMax - computedMin;
+  const xMin = points[0].x;
+  const xMax = points[points.length - 1].x;
+  const xRange = xMax - xMin || 1;
 
   const width = 300;
   const paddingY = 10;
   const plotH = height - paddingY * 2;
 
-  const pathPoints = points.map((val, idx) => {
-    const x = (idx / (points.length - 1)) * width;
-    const y = height - paddingY - ((val - computedMin) / range) * plotH;
+  const pathPoints = points.map((point) => {
+    const x = ((point.x - xMin) / xRange) * width;
+    const y = height - paddingY - ((point.value - computedMin) / range) * plotH;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
 
   const pathD = `M ${pathPoints.join(' L ')}`;
   const areaD = `M 0,${height} L ${pathPoints.join(' L ')} L ${width},${height} Z`;
 
-  const lastVal = data[data.length - 1];
+  const lastVal = data[data.length - 1].value;
 
   return (
     <div className="relative w-full">
@@ -112,12 +120,12 @@ const MiniLineChart: React.FC<MiniLineChartProps> = ({
 export const ChartsPanel: React.FC = () => {
   const { telemetryHistory } = useSimulationStore();
 
-  const rewards = telemetryHistory.map((s) => s.average_reward);
-  const successRates = telemetryHistory.map((s) => s.success_rate * 100);
-  const throughputs = telemetryHistory.map((s) => s.steps_per_second);
-  const gripForces = telemetryHistory.map((s) => s.grip_force);
-  const reqForces = telemetryHistory.map((s) => s.required_grip_force);
-  const breakForces = telemetryHistory.map((s) => s.break_force);
+  const pointsFor = (value: (sample: typeof telemetryHistory[number]) => number): ChartPoint[] =>
+    telemetryHistory.map((sample) => ({ x: sample.total_steps, value: value(sample) }));
+  const rewards = pointsFor((sample) => sample.average_reward);
+  const successRates = pointsFor((sample) => sample.success_rate * 100);
+  const throughputs = pointsFor((sample) => sample.steps_per_second);
+  const gripForces = pointsFor((sample) => sample.grip_force);
 
   return (
     <div id="telemetry-charts-container" className="w-full space-y-2">
@@ -141,7 +149,7 @@ export const ChartsPanel: React.FC = () => {
             <span className="text-[10px] text-slate-500">X: Steps | Y: Reward</span>
           </div>
           <MiniLineChart
-            data={rewards.length > 0 ? rewards : [10.2, 11.5, 12.8, 14.1, 14.8]}
+            data={rewards}
             color="#34d399"
             format={(v) => v.toFixed(2)}
           />
@@ -157,7 +165,7 @@ export const ChartsPanel: React.FC = () => {
             <span className="text-[10px] text-slate-500">X: Steps | Y: %</span>
           </div>
           <MiniLineChart
-            data={successRates.length > 0 ? successRates : [88.5, 89.2, 90.4, 91.8, 92.7]}
+            data={successRates}
             color="#38bdf8"
             min={0}
             max={100}
@@ -176,7 +184,7 @@ export const ChartsPanel: React.FC = () => {
             <span className="text-[10px] text-slate-500">X: Time | Y: Steps/s</span>
           </div>
           <MiniLineChart
-            data={throughputs.length > 0 ? throughputs : [31200, 32100, 32420, 32800]}
+            data={throughputs}
             color="#fbbf24"
             format={(v) => Math.round(v).toLocaleString()}
           />
@@ -192,7 +200,7 @@ export const ChartsPanel: React.FC = () => {
             <span className="text-[10px] text-slate-500">X: Step | Y: Newtons</span>
           </div>
           <MiniLineChart
-            data={gripForces.length > 0 ? gripForces : [6.5, 7.2, 7.8, 7.5, 8.1]}
+            data={gripForces}
             color="#c084fc"
             min={0}
             max={15}

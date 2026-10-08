@@ -312,8 +312,8 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 	}{
 		{ModeBaseOnly, -0.8},
 		{ModeResidual, 0.4},
-		{ModePureRL, 0.4},
-		{ModeParametricSAC, 0.4},
+		{ModePureRL, 0.7},
+		{ModeParametricSAC, -0.8},
 	}
 	for _, test := range tests {
 		config := DefaultConfig()
@@ -341,6 +341,36 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 		if result.Info["base_action_horizontal"] != -0.8 || result.Info["residual_action_horizontal"] != 0.7 || result.Info["final_action_horizontal"] != 0.4 {
 			t.Fatalf("mode %s lost dual-loop decomposition: %#v", test.mode, result.Info)
 		}
+	}
+}
+
+func TestPureRLAppliesDenseParametricResidualToVerticalAndGripChannels(t *testing.T) {
+	config := DefaultConfig()
+	config.ControlMode = ModePureRL
+	config.Homeostasis.Enabled = false
+	task := NewTask(71, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	initialY := task.environment.state.GripperY
+	residual := framework.Action{0.021, -0.996, 1.0}
+	result, err := task.StepDecomposed(
+		framework.Action{0, 0, 0},
+		framework.Action{0, 0, 0},
+		residual,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.GripperY >= initialY {
+		t.Fatalf("pure_rl did not descend from y=%v: state=%#v", initialY, task.environment.state)
+	}
+	if result.AppliedAction[1] >= 0 || result.AppliedAction[2] <= 0 {
+		t.Fatalf("pure_rl did not apply residual y/grip channels: applied=%v", result.AppliedAction)
+	}
+	if math.Abs(float64(result.AppliedAction[1])-float64(residual[1])*config.ActionSmoothingAlpha) > 1e-5 ||
+		math.Abs(float64(result.AppliedAction[2])-float64(residual[2])) > 1e-5 {
+		t.Fatalf("pure_rl residual was not passed through the physical filter: applied=%v residual=%v", result.AppliedAction, residual)
 	}
 }
 

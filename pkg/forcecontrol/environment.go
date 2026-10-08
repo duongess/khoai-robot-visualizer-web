@@ -629,14 +629,18 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	// base or residual vector as an all-zero command.
 	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
 	if decompositionAvailable {
+		// The wire streams have model-specific ownership. Dense parametric MLP
+		// publishes f(x; theta) as the residual stream; connectome Parametric SAC
+		// publishes it as the fly-base stream. Residual composition alone consumes
+		// the pre-composed final stream.
 		switch e.config.EffectiveControlMode() {
-		case ModeBaseOnly:
+		case ModeBaseOnly, ModeParametricSAC:
 			selected = baseValues
-		case ModeResidual, ModePureRL, ModeParametricSAC:
-			// True Parametric SAC / pure-RL control must execute the evaluated
-			// controller action f(x; theta) rather than the raw residual branch.
-			// The residual stream remains available for diagnostics, but it is not
-			// the actuator command for these modes.
+		case ModePureRL:
+			selected = residualValues
+		case ModeResidual:
+			selected = finalValues
+		default:
 			selected = finalValues
 		}
 	}
@@ -708,7 +712,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		e.updateHomeostasis(terminalReason)
 		rewardAction := filteredValues
 		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
-			rewardAction = finalValues
+			rewardAction = selected
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
@@ -720,7 +724,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	if e.state.Phase == PhaseSuccess {
 		rewardAction := filteredValues
 		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
-			rewardAction = finalValues
+			rewardAction = selected
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		if !e.successRewardAwarded {
@@ -758,7 +762,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	}
 	rewardAction := filteredValues
 	if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
-		rewardAction = finalValues
+		rewardAction = selected
 	}
 	e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil

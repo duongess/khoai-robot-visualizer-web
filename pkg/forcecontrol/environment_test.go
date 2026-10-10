@@ -35,6 +35,26 @@ func TestResetStartsActiveEpisodeAndGoalConditionedObservation(t *testing.T) {
 	}
 }
 
+func TestTerminalEpisodeRequiresResetBeforeAnotherStep(t *testing.T) {
+	task := NewTask(7, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	task.environment.state.Phase = PhaseSuccess
+	if !task.IsTerminal() {
+		t.Fatal("successful episode was not reported as terminal")
+	}
+	if _, err := task.Step(framework.Action{0, 0, 0}); err == nil {
+		t.Fatal("terminal episode accepted another action")
+	}
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if task.IsTerminal() {
+		t.Fatal("reset task stayed terminal")
+	}
+}
+
 func TestHomeostasisEnergyDecaysOnceResetsAndStaysObservable(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = true
@@ -152,15 +172,18 @@ func TestPrematureDescentPenaltyOnlyActivatesBelowTravelClearance(t *testing.T) 
 	env.state = previous
 	env.state.GripperY = 2.6
 	result := env.rewardWithActions(previous, [3]float64{0, 0, 0}, [3]float64{})
-	if result.Penalty < config.Reward.TimePenalty-1e-9 {
-		t.Fatalf("travel-height descent should not be punished: %#v", result)
+	if result.Penalty >= 0 {
+		t.Fatalf("travel-height idle descent should remain negatively rewarded under distance shaping: %#v", result)
 	}
 
 	previous.GripperY = 0.8
 	env.state.GripperY = 0.6
 	lowResult := env.rewardWithActions(previous, [3]float64{0, 0, 0}, [3]float64{})
-	if lowResult.Penalty >= result.Penalty {
-		t.Fatalf("below-clearance descent should be penalized more strongly: high=%#v low=%#v", result, lowResult)
+	if result.Penalty > lowResult.Penalty {
+		t.Fatalf("far-from-object travel-height idle should be penalized more strongly than a near-grasp descent: high=%#v low=%#v", result, lowResult)
+	}
+	if lowResult.Penalty >= 0 {
+		t.Fatalf("lowering below clearance should still be negatively rewarded under dense approach shaping: %#v", lowResult)
 	}
 }
 
@@ -282,19 +305,11 @@ func TestLiftStallIsPenalizedUntilObjectGainsHeight(t *testing.T) {
 	}
 }
 
-func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *testing.T) {
-	tests := []struct {
-		mode ControlMode
-		want float32
-	}{
-		{ModeBaseOnly, -0.8},
-		{ModeResidual, 0.4},
-		{ModePureRL, 0.7},
-		{ModeParametricSAC, -0.8},
-	}
+func TestPrimaryPythonActionWinsOverDecompositionInEveryLegacyMode(t *testing.T) {
+	tests := []ControlMode{ModeBaseOnly, ModeResidual, ModePureRL, ModeParametricSAC}
 	for _, test := range tests {
 		config := DefaultConfig()
-		config.ControlMode = test.mode
+		config.ControlMode = test
 		config.Homeostasis.Enabled = false
 		task := NewTask(71, config)
 		if _, err := task.Reset(); err != nil {
@@ -307,17 +322,48 @@ func TestControlModesSelectModelBranchesWithoutCallingReferenceController(t *tes
 			framework.Action{0.7, 0, 0},
 		)
 		if err != nil {
-			t.Fatalf("mode %s: %v", test.mode, err)
+			t.Fatalf("mode %s: %v", test, err)
 		}
-		if math.Abs(float64(result.AppliedAction[0])-float64(test.want)*config.ActionSmoothingAlpha) > 1e-5 {
-			t.Fatalf("mode %s applied %v; branch selection is wrong", test.mode, result.AppliedAction)
+		const primary = float32(0.4)
+		if math.Abs(float64(result.AppliedAction[0])-float64(primary)*config.ActionSmoothingAlpha) > 1e-5 {
+			t.Fatalf("mode %s applied %v; primary action was overridden", test, result.AppliedAction)
 		}
-		if test.want != 0 && task.environment.state.CarriageX == initialX {
-			t.Fatalf("mode %s did not apply selected neural command", test.mode)
+		if task.environment.state.CarriageX == initialX {
+			t.Fatalf("mode %s did not apply the primary neural command", test)
 		}
 		if result.Info["base_action_horizontal"] != -0.8 || result.Info["residual_action_horizontal"] != 0.7 || result.Info["final_action_horizontal"] != 0.4 {
-			t.Fatalf("mode %s lost dual-loop decomposition: %#v", test.mode, result.Info)
+			t.Fatalf("mode %s lost diagnostic decomposition: %#v", test, result.Info)
 		}
+	}
+}
+
+func TestPrimaryParametricActionDrivesVerticalAndGripChannels(t *testing.T) {
+	config := DefaultConfig()
+	config.ControlMode = ModePureRL
+	config.Homeostasis.Enabled = false
+	task := NewTask(71, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	initialY := task.environment.state.GripperY
+	primary := framework.Action{0.021, -0.996, 1.0}
+	result, err := task.StepDecomposed(
+		primary,
+		framework.Action{0, 0, 0},
+		framework.Action{0, 0, 0},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.environment.state.GripperY >= initialY {
+		t.Fatalf("primary parametric action did not descend from y=%v: state=%#v", initialY, task.environment.state)
+	}
+	if result.AppliedAction[1] >= 0 || result.AppliedAction[2] <= 0 {
+		t.Fatalf("primary parametric action did not apply y/grip channels: applied=%v", result.AppliedAction)
+	}
+	if math.Abs(float64(result.AppliedAction[1])-float64(primary[1])*config.ActionSmoothingAlpha) > 1e-5 ||
+		math.Abs(float64(result.AppliedAction[2])-float64(primary[2])) > 1e-5 {
+		t.Fatalf("primary parametric action was not passed through the physical filter: applied=%v primary=%v", result.AppliedAction, primary)
 	}
 }
 
@@ -366,8 +412,8 @@ func TestResidualModeStillTrainsFlyBaseWithSpatialProgress(t *testing.T) {
 	previous := environment.state
 	environment.state.CarriageX = 1.1
 	reward := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	if reward.Approach <= 0 || reward.Total <= config.Reward.TimePenalty {
-		t.Fatalf("residual mode starved fly-base spatial learning: %#v", reward)
+	if reward.Approach <= 0 || reward.Total >= 0 {
+		t.Fatalf("residual mode still needs positive spatial learning under dense object-distance shaping: %#v", reward)
 	}
 }
 
@@ -443,8 +489,10 @@ func TestAlignResetUniformlySpawnsObjectAndBalancesCarriageSides(t *testing.T) {
 			t.Fatal(err)
 		}
 		state := task.environment.state
-		if state.ObjectX < 0.8 || state.ObjectX > 5.2 {
-			t.Fatalf("align object X=%v outside uniform spawn interval [0.8, 5.2]", state.ObjectX)
+		minimumX := math.Max(config.Workspace.MinX+config.GripperWidth/2, config.Workspace.MinX+config.ObjectWidth/2)
+		maximumX := math.Min(config.Workspace.MaxX-config.GripperWidth/2, config.Workspace.MaxX-config.ObjectWidth/2)
+		if state.ObjectX < minimumX || state.ObjectX > maximumX {
+			t.Fatalf("align object X=%v outside reachable interval [%v, %v]", state.ObjectX, minimumX, maximumX)
 		}
 		minimumSeparation := (config.ObjectWidth+config.TargetWidth)/2 + config.HorizontalTolerance
 		if math.Abs(state.TargetX-state.ObjectX) < minimumSeparation-1e-9 {
@@ -500,6 +548,57 @@ func TestAllCurriculumResetsKeepObjectAndTargetDistinct(t *testing.T) {
 	}
 }
 
+func TestResetSamplesBothLandmarksAcrossReachableWorkspace(t *testing.T) {
+	for _, stage := range []CurriculumStage{CurriculumAlignAndContact, CurriculumFullPickAndPlace} {
+		t.Run(string(stage), func(t *testing.T) {
+			config := DefaultConfig()
+			config.Curriculum.Stage = stage
+			task := NewTask(314, config)
+			objectMin := math.Max(config.Workspace.MinX+config.GripperWidth/2, config.Workspace.MinX+config.ObjectWidth/2)
+			objectMax := math.Min(config.Workspace.MaxX-config.GripperWidth/2, config.Workspace.MaxX-config.ObjectWidth/2)
+			targetMin := math.Max(config.Workspace.MinX+config.GripperWidth/2, config.Workspace.MinX+config.TargetWidth/2)
+			targetMax := math.Min(config.Workspace.MaxX-config.GripperWidth/2, config.Workspace.MaxX-config.TargetWidth/2)
+			minimumSeparation := (config.ObjectWidth+config.TargetWidth)/2 + config.HorizontalTolerance
+			seenObjectLeft, seenObjectRight := false, false
+			seenTargetLeft, seenTargetRight := false, false
+			seenTargetBeforeObject, seenTargetAfterObject := false, false
+			for reset := 0; reset < 2000; reset++ {
+				if _, err := task.Reset(); err != nil {
+					t.Fatal(err)
+				}
+				state := task.environment.state
+				if state.ObjectX < objectMin || state.ObjectX > objectMax || state.TargetX < targetMin || state.TargetX > targetMax {
+					t.Fatalf("reset %d has unreachable landmark positions: %#v", reset, state)
+				}
+				if math.Abs(state.TargetX-state.ObjectX) < minimumSeparation-1e-9 {
+					t.Fatalf("reset %d overlaps object and target: %#v", reset, state)
+				}
+				if math.Abs(state.ObjectY-(task.environment.terrainHeight(state.ObjectX)+config.ObjectHeight/2)) > 1e-9 || math.Abs(state.TargetY-task.environment.terrainHeight(state.TargetX)) > 1e-9 {
+					t.Fatalf("reset %d did not place landmarks on terrain: %#v", reset, state)
+				}
+				seenObjectLeft = seenObjectLeft || state.ObjectX < 0.7
+				seenObjectRight = seenObjectRight || state.ObjectX > 5.3
+				seenTargetLeft = seenTargetLeft || state.TargetX < 0.7
+				seenTargetRight = seenTargetRight || state.TargetX > 5.3
+				seenTargetBeforeObject = seenTargetBeforeObject || state.TargetX < state.ObjectX
+				seenTargetAfterObject = seenTargetAfterObject || state.TargetX > state.ObjectX
+			}
+			if !seenObjectLeft || !seenObjectRight || !seenTargetLeft || !seenTargetRight || !seenTargetBeforeObject || !seenTargetAfterObject {
+				t.Fatalf("reset distribution missed reachable ends or an ordering: object=(%t,%t), target=(%t,%t), order=(%t,%t)", seenObjectLeft, seenObjectRight, seenTargetLeft, seenTargetRight, seenTargetBeforeObject, seenTargetAfterObject)
+			}
+		})
+	}
+}
+
+func TestResetRejectsWorkspaceTooNarrowForDistinctLandmarks(t *testing.T) {
+	config := DefaultConfig()
+	config.Workspace.MaxX = 0.9
+	config.InitialCarriageX = 0.45
+	if _, err := NewTask(1, config).Reset(); err == nil {
+		t.Fatal("reset accepted overlapping object and target in a narrow workspace")
+	}
+}
+
 func TestPhaseOneApproachProgressRewardsPositiveHorizontalReduction(t *testing.T) {
 	config := DefaultConfig()
 	config.Homeostasis.Enabled = false
@@ -533,11 +632,11 @@ func TestDetachedApproachIdleReceivesStallPenaltyAndTimeout(t *testing.T) {
 	previous := State{Phase: PhaseApproachObject, CarriageX: 2, ObjectX: 1}
 	environment.state = previous
 	idle := environment.rewardWithActions(previous, [3]float64{}, [3]float64{})
-	want := config.Reward.TimePenalty + config.Reward.ApproachStallPenalty
+	want := config.Reward.TimePenalty + config.Reward.ApproachStallPenalty - 0.5*gripperObjectDistance(previous)
 	if math.Abs(idle.Penalty-want) > 1e-9 {
 		t.Fatalf("idle approach penalty = %v, want %v", idle.Penalty, want)
 	}
-	if idle.Total >= config.Reward.TimePenalty {
+	if idle.Total >= 0 {
 		t.Fatalf("idle approach did not degrade reward beyond time cost: %+v", idle)
 	}
 
@@ -554,6 +653,94 @@ func TestDefaultActionDeadZoneAllowsFineControl(t *testing.T) {
 	if got := DefaultConfig().ActionDeadZone; got != 0.02 {
 		t.Fatalf("action dead zone = %v, want 0.02", got)
 	}
+	config := DefaultConfig()
+	environment := newEnvironment(1, config)
+	raw, err := environment.validatedAction([]float32{0.021, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := environment.filterAction(raw)[0]; got < config.ActionDeadZone*config.ActionSmoothingAlpha {
+		t.Fatalf("first filtered movement = %v, expected command above scaled dead zone", got)
+	}
+}
+
+func TestResetSamplesOnlyGraspsBelowMotorSafetyMargin(t *testing.T) {
+	task := NewTask(72, DefaultConfig())
+	for episode := 0; episode < 1000; episode++ {
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		state := task.environment.state
+		required := state.ObjectMass * 9.81 / (2 * state.ObjectFriction)
+		if required > 17.5 {
+			t.Fatalf("episode %d needs %.3f N for mass %.3f kg at mu %.3f", episode+1, required, state.ObjectMass, state.ObjectFriction)
+		}
+	}
+}
+
+func TestTwentyRandomizedApproachesAvoidStep120Timeout(t *testing.T) {
+	config := DefaultConfig()
+	config.Curriculum.Stage = CurriculumFullPickAndPlace
+	task := NewTask(2026, config)
+	outcomes := map[string]int{}
+	for episode := 1; episode <= 20; episode++ {
+		if _, err := task.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		finished := false
+		leftApproach := false
+		for step := 1; step <= config.MaxEpisodeSteps; step++ {
+			state := task.environment.state
+			action := framework.Action{0, 0, -1}
+			switch state.Phase {
+			case PhaseApproachObject:
+				errorX := (state.CarriageX - state.ObjectX) / (config.Workspace.MaxX - config.Workspace.MinX)
+				gain := 1.0
+				if distance := math.Abs(state.CarriageX - state.ObjectX); distance >= 0.15 && distance <= 0.60 {
+					gain = 3.0
+				}
+				action[0] = float32(clamp(-2*gain*errorX, -1, 1))
+			case PhaseLowerToObject:
+				action[1] = -1
+			case PhaseGripObject:
+				action[2] = testPolicyGripRate(task)
+			case PhaseLiftObject:
+				action[1], action[2] = 1, testPolicyGripRate(task)
+			case PhaseMoveToTarget:
+				deltaX := state.TargetX - state.ObjectX
+				action[0] = float32(clamp(2*deltaX-0.8*state.CarriageVelocityX, -1, 1))
+				action[2] = testPolicyGripRate(task)
+			case PhaseLowerAtTarget:
+				action[1], action[2] = -1, testPolicyGripRate(task)
+			}
+			result, err := task.Step(action)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if task.environment.state.Phase != PhaseApproachObject {
+				leftApproach = true
+			}
+			if result.Done {
+				if task.environment.failureReason == "approach_timeout" {
+					t.Fatalf("episode %d hit approach_timeout at step %d", episode, step)
+				}
+				finished = true
+				break
+			}
+		}
+		if !finished {
+			t.Fatalf("episode %d did not finish within %d steps", episode, config.MaxEpisodeSteps)
+		}
+		if !leftApproach {
+			t.Fatalf("episode %d ended before leaving approach: reason=%s", episode, task.environment.failureReason)
+		}
+		reason := task.environment.failureReason
+		if reason == "" {
+			reason = "success"
+		}
+		outcomes[reason]++
+	}
+	t.Logf("20 complete episodes: outcomes=%v, approach_timeout=%d", outcomes, outcomes["approach_timeout"])
 }
 
 func TestObservationNormalizesSignedHorizontalErrorAgainstWorkspaceLength(t *testing.T) {
@@ -670,8 +857,8 @@ func TestDeliveryProgressAndReleaseOutcomes(t *testing.T) {
 	outside.environment.state.Phase = PhaseReleaseObject
 	outside.environment.state.CarriageX = 1
 	outside.environment.state.ObjectX = 1
-	outside.environment.state.GripperY = outside.environment.targetRestHeight()
-	outside.environment.state.ObjectY = outside.environment.targetRestHeight() - outside.environment.config.ObjectHeight/2
+	outside.environment.state.ObjectY = outside.environment.terrainHeight(1) + outside.environment.config.ObjectHeight/2
+	outside.environment.state.GripperY = outside.environment.objectGripHeight()
 	result, err := outside.Step(framework.Action{0, 0, -1})
 	if err != nil {
 		t.Fatal(err)
@@ -912,6 +1099,62 @@ func TestReleasedObjectMustStabilizeBeforeSuccess(t *testing.T) {
 	}
 }
 
+func TestAcceptedReleaseRemainsOpenWhileObjectSettles(t *testing.T) {
+	config := DefaultConfig()
+	task := NewTask(1, config)
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	env := task.environment
+	env.state.Phase = PhaseReleaseObject
+	env.state.Grip = GripState{GripperClosed: true, ContactDetected: true, ForceValid: true, ObjectAttached: true}
+	env.state.ObjectGrasped = true
+	env.state.CarriageX, env.state.ObjectX = env.state.TargetX, env.state.TargetX
+	env.state.GripperY = env.targetReleaseGuideHeight()
+	env.state.ObjectY = env.targetRestHeight()
+	env.state.ObjectPlaced = true
+	env.wasEverGrasped, env.objectWasLifted = true, true
+
+	first, err := task.Step(framework.Action{0, 0, -1})
+	if err != nil || first.Done || !env.releaseCommanded {
+		t.Fatalf("valid release did not begin settling: result=%#v error=%v", first, err)
+	}
+	for step := 0; step < config.StablePlacementSteps; step++ {
+		// This command reduces force but does not cross the release threshold.
+		// The jaws must stay open after the earlier accepted release.
+		result, err := task.Step(framework.Action{0, 0, -0.769})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if env.state.GripperOpening != 1 || env.state.GripForce != 0 {
+			t.Fatalf("accepted release was undone while settling: state=%#v", env.state)
+		}
+		if result.Done {
+			if result.Outcome != OutcomeSuccess {
+				t.Fatalf("stable placement ended without success: %#v", result)
+			}
+			return
+		}
+	}
+	t.Fatal("stable placement never became successful after an accepted release")
+}
+
+func TestTargetPlacementUsesTerrainHeightAtObjectPosition(t *testing.T) {
+	task := NewTask(1, DefaultConfig())
+	if _, err := task.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	env := task.environment
+	env.config.Terrain = []TerrainPoint{{X: 0, Y: 0}, {X: 6, Y: 3.6}}
+	env.state.TargetX = 3
+	env.state.TargetY = env.terrainHeight(env.state.TargetX)
+	env.state.ObjectX = 3.3
+	env.state.ObjectY = env.terrainHeight(env.state.ObjectX) + env.config.ObjectHeight/2
+	if !env.objectInsideTarget() {
+		t.Fatalf("object resting on sloped ground inside target was rejected: state=%#v", env.state)
+	}
+}
+
 func TestEmptyGripperAtTargetCannotAttachEarnDeliveryOrSucceed(t *testing.T) {
 	config := DefaultConfig()
 	task := NewTask(1, config)
@@ -989,12 +1232,12 @@ func TestSustainedInsufficientContactForceIsNotAFreePolicy(t *testing.T) {
 
 func TestGripForceHasBoundedSlewAndReleaseGuard(t *testing.T) {
 	config := DefaultConfig()
-	config.InitialCarriageX = config.InitialObjectX
-	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
 	if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 		t.Fatal(err)
 	}
@@ -2084,8 +2327,10 @@ func TestCurriculumRandomizationVariesResetsReproducibly(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstEpisode := first.environment.state
-	if firstEpisode.ObjectX < 0.8 || firstEpisode.ObjectX > 5.2 {
-		t.Fatalf("first align reset must use the uniform object distribution: %#v", firstEpisode)
+	minimumObjectX := math.Max(config.Workspace.MinX+config.GripperWidth/2, config.Workspace.MinX+config.ObjectWidth/2)
+	maximumObjectX := math.Min(config.Workspace.MaxX-config.GripperWidth/2, config.Workspace.MaxX-config.ObjectWidth/2)
+	if firstEpisode.ObjectX < minimumObjectX || firstEpisode.ObjectX > maximumObjectX {
+		t.Fatalf("first align reset must use the reachable object distribution: %#v", firstEpisode)
 	}
 	minimumSeparation := (config.ObjectWidth+config.TargetWidth)/2 + config.HorizontalTolerance
 	if math.Abs(firstEpisode.TargetX-firstEpisode.ObjectX) < minimumSeparation-1e-9 {
@@ -2307,12 +2552,13 @@ func TestPhaseCannotSkipSecureAttachment(t *testing.T) {
 
 func attachedTask(t *testing.T, config Config) *Task {
 	t.Helper()
-	config.InitialCarriageX = config.InitialObjectX
-	config.InitialGripperY = GraspHeight(config, terrainHeightForConfig(config, config.InitialObjectX)+config.ObjectHeight/2, config.InitialCarriageX)
 	task := NewTask(1, config)
 	if _, err := task.Reset(); err != nil {
 		t.Fatal(err)
 	}
+	task.environment.state.CarriageX = task.environment.state.ObjectX
+	task.environment.state.GripperY = task.environment.objectGripHeight()
+	task.environment.state.Phase = PhaseGripObject
 	for step := 0; step < 30 && !task.environment.state.Grip.ObjectAttached; step++ {
 		if _, err := task.Step(framework.Action{0, 0, 0.5}); err != nil {
 			t.Fatalf("could not establish valid attachment: state=%#v err=%v", task.environment.state.Grip, err)

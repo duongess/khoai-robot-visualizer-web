@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,111 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+type apiFailOnceTask struct {
+	failOnce   bool
+	resetCount int
+}
+
+func (task *apiFailOnceTask) Reset() (framework.State, error) {
+	task.resetCount++
+	return framework.State{0}, nil
+}
+
+func (task *apiFailOnceTask) Step(framework.Action) (framework.StepResult, error) {
+	if task.failOnce {
+		task.failOnce = false
+		return framework.StepResult{}, errors.New("worker 2 terminal step failed")
+	}
+	return framework.StepResult{State: framework.State{0}, Outcome: framework.OutcomeRunning}, nil
+}
+
+type apiFailOnceFactory struct{ tasks []*apiFailOnceTask }
+
+func (factory *apiFailOnceFactory) Create() (framework.Task, error) {
+	task := &apiFailOnceTask{failOnce: len(factory.tasks) == 1}
+	factory.tasks = append(factory.tasks, task)
+	return task, nil
+}
+
+func TestAPIResetRecoversWorkerErrorWithoutPausingFirst(t *testing.T) {
+	runtime := framework.NewRuntime()
+	factory := &apiFailOnceFactory{}
+	if err := runtime.RegisterTask(framework.TaskRegistration{
+		Descriptor: framework.TaskDescriptor{Name: "api-reset", StateDimension: 1, ActionDimension: 3, ActionMin: -1, ActionMax: 1},
+		Factory:    factory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	config := framework.DefaultRuntimeConfig()
+	config.WorkerCount, config.TickInterval, config.RandomActionWarmupTransitions, config.WarmupTransitions = 2, time.Millisecond, 0, 100000
+	if err := runtime.Configure(config, apiTestLearner{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := runtime.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Stop()
+	deadline := time.Now().Add(time.Second)
+	for runtime.Snapshot().Status != framework.RuntimeError && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if runtime.Snapshot().Status != framework.RuntimeError {
+		t.Fatal("worker 2 did not enter runtime error state")
+	}
+	server, err := NewAPIServer(runtime, forcecontrol.DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/simulation/reset", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("reset response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var resetResponse struct {
+		RuntimeStatus framework.RuntimeStatus `json:"runtime_status"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resetResponse); err != nil || resetResponse.RuntimeStatus != framework.RuntimeRunning {
+		t.Fatalf("reset did not report running status: body=%s err=%v", recorder.Body.String(), err)
+	}
+	if snapshot := runtime.Snapshot(); snapshot.Status != framework.RuntimeRunning || snapshot.LastError != "" {
+		t.Fatalf("reset did not recover worker error: %#v", snapshot)
+	}
+	runtime.Stop()
+	for index, task := range factory.tasks {
+		if task.resetCount < 2 {
+			t.Fatalf("worker %d was not reset after error", index+1)
+		}
+	}
+}
+
+func TestAPIServerPublishesLearnerModelAndRejectsControlModeChanges(t *testing.T) {
+	runtime := framework.NewRuntime()
+	server, err := NewAPIServer(runtime, forcecontrol.DefaultConfig(), framework.HealthStatus{
+		ControllerType:  "parametric_mlp",
+		ActiveModelName: "Parametric MLP (Dense)",
+		ModelName:       "parametric_mlp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthRecorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(healthRecorder, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if healthRecorder.Code != http.StatusOK || !bytes.Contains(healthRecorder.Body.Bytes(), []byte("Parametric MLP (Dense)")) {
+		t.Fatalf("health response does not identify active learner: status=%d body=%s", healthRecorder.Code, healthRecorder.Body.String())
+	}
+	telemetry := server.telemetry()
+	if telemetry["runtime"].(map[string]any)["active_model_name"] != "Parametric MLP (Dense)" {
+		t.Fatalf("telemetry did not publish active learner identity: %#v", telemetry)
+	}
+	modeRecorder := httptest.NewRecorder()
+	server.APIHandler().ServeHTTP(modeRecorder, httptest.NewRequest(http.MethodPost, "/api/control-mode", bytes.NewBufferString(`{"control_mode":"fly_connectome"}`)))
+	if modeRecorder.Code != http.StatusMethodNotAllowed || !bytes.Contains(modeRecorder.Body.Bytes(), []byte("MODEL_MANAGED_BY_LEARNER")) {
+		t.Fatalf("control-mode endpoint must be disabled: status=%d body=%s", modeRecorder.Code, modeRecorder.Body.String())
+	}
+}
+
 type apiTestLearner struct{}
 
 func (apiTestLearner) HealthCheck(context.Context) (framework.HealthStatus, error) {
@@ -21,13 +127,21 @@ func (apiTestLearner) HealthCheck(context.Context) (framework.HealthStatus, erro
 }
 func (apiTestLearner) PredictBatch(_ context.Context, states []framework.State, policyVersion uint64) (framework.PredictionResult, error) {
 	actions := make([]framework.Action, len(states))
+	values := make([]float32, len(states))
 	for i := range actions {
 		actions[i] = framework.Action{0, 0, -1}
+		values[i] = -0.75
 	}
 	if policyVersion == 0 {
 		policyVersion = 1
 	}
-	return framework.PredictionResult{Actions: actions, PolicyVersion: policyVersion}, nil
+	return framework.PredictionResult{
+		Actions: actions,
+		ReflexParameters: []framework.ReflexParameter{{
+			Name: "channel_1.a", Values: values, MinValue: -1, MaxValue: 1, DefaultValue: -0.5,
+		}},
+		PolicyVersion: policyVersion,
+	}, nil
 }
 func (apiTestLearner) TrainBatch(context.Context, []framework.Transition) (framework.TrainingResult, error) {
 	return framework.TrainingResult{}, nil
@@ -81,6 +195,14 @@ func TestAPIServerRejectsRunningSceneUpdatesAndPublishesTelemetry(t *testing.T) 
 	}
 	if workerTelemetry["contact_detected"] == nil || workerTelemetry["object_attached"] == nil || workerTelemetry["delivery_reward"] == nil {
 		t.Fatalf("telemetry lacks secure-grasp diagnostics: %#v", workerTelemetry)
+	}
+	parameters := workerTelemetry["reflex_parameters"].([]framework.ReflexParameterValue)
+	if len(parameters) != 1 || parameters[0].Name != "channel_1.a" || parameters[0].Value != -0.75 {
+		t.Fatalf("telemetry lacks learner reflex parameters: %#v", workerTelemetry["reflex_parameters"])
+	}
+	control := workerTelemetry["control"].(map[string]any)
+	if control["command_source"] != "python_evaluated_reflex" || control["model_managed"] != true {
+		t.Fatalf("telemetry does not identify the learner-authoritative command: %#v", control)
 	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPut, "/api/scene", nil)

@@ -2,13 +2,11 @@ import React, { useState } from 'react';
 import { useSimulationStore } from '../../lib/simulation-store';
 import { runtimeClient } from '../../lib/runtime-client';
 import { Play, Pause, RotateCw, RefreshCw, Layers, AlertTriangle, CheckCircle2, Save } from 'lucide-react';
-import { ControlMode, SimulationMode } from '../../types/simulation';
+import { SimulationMode } from '../../types/simulation';
 
 export const SimulationControls: React.FC = () => {
 	const [modelFeedback, setModelFeedback] = useState<string | null>(null);
 	const [savingModel, setSavingModel] = useState(false);
-	const [switchingControl, setSwitchingControl] = useState(false);
-	const [controlFeedback, setControlFeedback] = useState<string | null>(null);
   const {
     runtimeStatus,
     selectedMode,
@@ -26,7 +24,7 @@ export const SimulationControls: React.FC = () => {
     cancelModeChange,
 		latestTelemetry,
   } = useSimulationStore();
-	const controlMode = latestTelemetry?.worker.control?.control_mode ?? 'residual';
+	const activeModelName = latestTelemetry?.runtime?.active_model_name ?? 'Connecting to learner…';
 
   const isRunning = runtimeStatus === 'running';
   const isPaused = runtimeStatus === 'paused';
@@ -45,20 +43,6 @@ export const SimulationControls: React.FC = () => {
 			setModelFeedback(error instanceof Error ? error.message : 'Could not save model.');
 		} finally {
 			setSavingModel(false);
-		}
-	};
-
-	const switchControlMode = async (mode: ControlMode) => {
-		if (mode === controlMode || switchingControl) return;
-		setSwitchingControl(true);
-		setControlFeedback(null);
-		try {
-			await runtimeClient.command<{ control_mode: ControlMode; episodes_reset: boolean }>('/api/control-mode', { control_mode: mode });
-			setControlFeedback(`Control: ${mode.replace('_', ' ')} · new episodes started`);
-		} catch (error) {
-			setControlFeedback(error instanceof Error ? error.message : 'Could not switch control mode.');
-		} finally {
-			setSwitchingControl(false);
 		}
 	};
 
@@ -181,38 +165,12 @@ export const SimulationControls: React.FC = () => {
           </div>
         </div>
 
-        {/* Center/Right Section: Mode Selector & Worker Switcher */}
+		{/* Center/Right Section: Server-selected model, runtime mode, and worker */}
         <div className="flex items-center gap-4">
-			{/* Physical command-composition selector. This is independent of the
-			    Swarm/Independent runtime selector below. */}
-			<div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 p-1 rounded-lg">
-				<span className="text-xs text-slate-400 px-2 font-mono">Control:</span>
-				{([
-					['base_only', 'Base only'],
-					['residual', 'Residual'],
-					['pure_rl', 'Pure RL'],
-					['parametric_sac', 'Parametric SAC'],
-				] as const).map(([mode, label]) => (
-					<button
-						key={mode}
-						id={`control-mode-${mode}-btn`}
-						onClick={() => void switchControlMode(mode)}
-						disabled={switchingControl}
-						className={`px-2.5 py-1 rounded text-xs font-medium transition-all ${
-							controlMode === mode
-								? 'bg-violet-500 text-white font-semibold shadow-xs'
-								: 'text-slate-400 hover:text-slate-200 disabled:text-slate-600'
-						}`}
-					>
-						{label}
-					</button>
-				))}
+			<div id="active-model-name" className="flex items-center gap-1.5 bg-violet-500/10 border border-violet-500/40 px-3 py-1.5 rounded-lg">
+				<span className="text-xs text-violet-200 font-mono">Model:</span>
+				<span className="text-xs text-violet-50 font-semibold">{activeModelName}</span>
 			</div>
-			{controlFeedback && (
-				<span className={`text-[11px] font-mono ${controlFeedback.startsWith('Control:') ? 'text-emerald-400' : 'text-red-400'}`}>
-					{controlFeedback}
-				</span>
-			)}
 
           {/* Mode Selector */}
           <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 p-1 rounded-lg">

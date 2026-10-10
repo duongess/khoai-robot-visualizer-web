@@ -13,7 +13,7 @@ const ObservationDimension = 30
 // CoordinateSystemVersion changes whenever policy-facing semantics, reward
 // semantics, or reset distributions change. Checkpoints for earlier schemas
 // must not be reused for a scientific comparison.
-const CoordinateSystemVersion = 33
+const CoordinateSystemVersion = 34
 
 const (
 	observationGripperX = iota
@@ -277,6 +277,18 @@ func (e *Environment) reset() State {
 		Phase:            PhaseApproachObject,
 		Energy:           clamp(e.config.Homeostasis.InitialEnergy, 0, 1),
 	}
+
+	// Ensure a feasible grasping corridor: required grip force must be at
+	// least 4N below the object's break force. If our randomized mass and
+	// friction would make grasping impossible, raise the per-episode break
+	// force to restore a safe margin.
+	if e.state.ObjectFriction > 0 {
+		required := e.state.ObjectMass * e.config.Gravity / (2 * e.state.ObjectFriction)
+		minBreak := required + 4.0
+		if e.state.ObjectBreakForce < minBreak {
+			e.state.ObjectBreakForce = minBreak
+		}
+	}
 	if e.config.Curriculum.Randomization.Enabled && e.resetCount > 0 {
 		_, _, minimumY, maximumY := e.safeBounds()
 		e.state.GripperY = clamp(e.state.GripperY+e.symmetricJitter(e.config.Curriculum.Randomization.ContactStartHeightJitter), minimumY, maximumY)
@@ -341,16 +353,15 @@ func (e *Environment) applyCurriculumReset() {
 }
 
 // placeNearObjectForAlignLesson samples a symmetric, detached relative pose
-// for lesson 1. It chooses left/right with equal probability, then samples a
-// safe offset on that side. The policy must still learn the signed X approach;
+// for lesson 1. It chooses a side, then samples a safe offset there, switching
+// sides near a workspace edge when necessary. The policy learns the signed X approach;
 // reset never aligns, contacts, or attaches the object on its behalf.
 func (e *Environment) placeNearObjectForAlignLesson() {
 	safeMinX, safeMaxX, _, _ := e.safeBounds()
 	minimumDistance := math.Max(e.config.AlignmentExitTolerance, e.config.GraspHorizontalTolerance) + 0.05
 	maximumDistance := math.Max(minimumDistance, e.config.Curriculum.AlignStartDistance+e.symmetricJitter(e.config.Curriculum.AlignStartDistanceJitter))
-	// A single coin flip is intentionally retained even near workspace edges:
-	// the distance range is shortened on that side rather than biasing all
-	// starts toward the roomier side of the rail.
+	// Start on either side when there is room; near an edge, use the side
+	// that still allows a detached approach.
 	direction := 1.0
 	if e.random.Intn(2) == 0 {
 		direction = -1
@@ -359,10 +370,15 @@ func (e *Environment) placeNearObjectForAlignLesson() {
 	if direction < 0 {
 		availableDistance = e.state.ObjectX - safeMinX
 	}
+	if availableDistance < minimumDistance {
+		direction = -direction
+		availableDistance = safeMaxX - e.state.ObjectX
+		if direction < 0 {
+			availableDistance = e.state.ObjectX - safeMinX
+		}
+	}
 	maximumDistance = math.Min(maximumDistance, availableDistance)
-	// Alignment object-spawn bounds guarantee this under the default geometry.
-	// If a custom workspace is too narrow, use the largest safe detached pose
-	// instead of emitting an invalid state.
+	// If a custom workspace is too narrow, use the largest safe detached pose.
 	if maximumDistance < minimumDistance {
 		maximumDistance = math.Max(0, availableDistance)
 	}
@@ -421,74 +437,62 @@ func (e *Environment) nearObjectCarriageX(distance, jitter, minimumDistance floa
 }
 
 // sampleEpisodeParameters produces a deterministic sequence for a given task
-// seed while varying every automatic-curriculum reset. Manual scene edits set
-// the centre of each distribution rather than being overwritten by a second
-// frontend-only object position.
+// seed while placing both landmarks anywhere the gripper can reach.
 func (e *Environment) sampleEpisodeParameters() (objectX, targetX, mass, friction float64) {
-	objectX, targetX = e.config.InitialObjectX, e.config.TargetX
 	mass, friction = e.config.InitialObjectMass, e.config.ObjectFriction
 	randomization := e.config.Curriculum.Randomization
-	stage := e.currentCurriculumStage()
-	if stage == CurriculumAlignAndContact {
-		// Lesson 1 must learn a directional approach rather than memorize the
-		// historical 1.5m object location. On the default 6m rail this is the
-		// requested uniform [0.8, 5.2] distribution; custom workspaces fall back
-		// to their geometry-safe interior.
-		minimumObjectX, maximumObjectX := e.alignmentObjectSpawnBounds()
-		objectX = minimumObjectX + e.random.Float64()*(maximumObjectX-minimumObjectX)
-	}
-	// The first reset after creating/replacing a task is exact. This makes a
-	// paused manual scene edit observable as the episode's authoritative state;
-	// subsequent resets vary around that manually chosen baseline.
-	if randomization.Enabled && e.resetCount > 0 {
-		if stage != CurriculumAlignAndContact {
-			objectX = clamp(objectX+e.symmetricJitter(randomization.ObjectXJitter), e.config.Workspace.MinX+e.config.ObjectWidth/2, e.config.Workspace.MaxX-e.config.ObjectWidth/2)
+	objectX, targetX = e.sampleLandmarkPositions()
+	// Reject physically impossible grasps: the motor clamps at 20 N, leaving
+	// at least 2.5 N of force headroom for every sampled episode.
+	const maxRequiredForce = 17.5
+	for attempt := 0; attempt < 128; attempt++ {
+		mass = math.Max(0.01, e.config.InitialObjectMass+e.symmetricJitter(randomization.ObjectMassJitter))
+		friction = 0.08 + e.random.Float64()*(0.35-0.08)
+		if mass*9.81/(2*friction) <= maxRequiredForce {
+			return
 		}
-		targetX = clamp(targetX+e.symmetricJitter(randomization.TargetXJitter), e.config.Workspace.MinX+e.config.TargetWidth/2, e.config.Workspace.MaxX-e.config.TargetWidth/2)
-		mass = math.Max(0.01, mass+e.symmetricJitter(randomization.ObjectMassJitter))
-		friction = clamp(friction+e.symmetricJitter(randomization.ObjectFrictionJitter), 0.05, 2)
 	}
-	// An object that starts inside its target has already satisfied the
-	// transport geometry before an action is taken.  That is particularly
-	// harmful in full pick-and-place training: depending on the random seed,
-	// SAC can learn that the target vector is irrelevant and collapse to a rail
-	// boundary.  Keep the two task landmarks distinct for *every* curriculum
-	// stage, including a manually centred first reset.  This is reset
-	// distribution hygiene, not a controller hint.
-	targetX = e.separateTargetFromObject(objectX, targetX)
+	// Keep Reset bounded even for a custom mass range with no valid draw.
+	friction = 0.35
+	mass = math.Min(math.Max(0.01, e.config.InitialObjectMass-math.Abs(randomization.ObjectMassJitter)),
+		maxRequiredForce*2*friction/9.81)
 	return
 }
 
-func (e *Environment) alignmentObjectSpawnBounds() (minimumX, maximumX float64) {
-	safeMinimum := e.config.Workspace.MinX + e.config.ObjectWidth/2
-	safeMaximum := e.config.Workspace.MaxX - e.config.ObjectWidth/2
-	minimumX = math.Max(0.8, safeMinimum)
-	maximumX = math.Min(5.2, safeMaximum)
-	if minimumX > maximumX {
-		return safeMinimum, safeMaximum
-	}
-	return minimumX, maximumX
-}
+// sampleLandmarkPositions draws the object across the entire reachable rail,
+// then draws the target uniformly from the remaining non-overlapping spans.
+func (e *Environment) sampleLandmarkPositions() (objectX, targetX float64) {
+	safeMinX, safeMaxX, _, _ := e.safeBounds()
+	objectMin := math.Max(safeMinX, e.config.Workspace.MinX+e.config.ObjectWidth/2)
+	objectMax := math.Min(safeMaxX, e.config.Workspace.MaxX-e.config.ObjectWidth/2)
+	targetMin := math.Max(safeMinX, e.config.Workspace.MinX+e.config.TargetWidth/2)
+	targetMax := math.Min(safeMaxX, e.config.Workspace.MaxX-e.config.TargetWidth/2)
+	separation := (e.config.ObjectWidth+e.config.TargetWidth)/2 + e.config.HorizontalTolerance
 
-// separateTargetFromObject prevents align-and-contact episodes from starting
-// as an already-completed placement problem. It preserves the configured
-// target side when possible and otherwise uses the other valid side.
-func (e *Environment) separateTargetFromObject(objectX, targetX float64) float64 {
-	minimumSeparation := (e.config.ObjectWidth+e.config.TargetWidth)/2 + e.config.HorizontalTolerance
-	minimumTargetX := e.config.Workspace.MinX + e.config.TargetWidth/2
-	maximumTargetX := e.config.Workspace.MaxX - e.config.TargetWidth/2
-	if math.Abs(targetX-objectX) >= minimumSeparation {
-		return clamp(targetX, minimumTargetX, maximumTargetX)
+	// In a narrow custom workspace, some object locations may leave no room
+	// for a target. Retry those locations; a valid configuration always has
+	// at least one feasible pair.
+	for attempt := 0; attempt < 64; attempt++ {
+		objectX = objectMin + e.random.Float64()*(objectMax-objectMin)
+		leftEnd := math.Min(targetMax, objectX-separation)
+		rightStart := math.Max(targetMin, objectX+separation)
+		leftLength := math.Max(0, leftEnd-targetMin)
+		rightLength := math.Max(0, targetMax-rightStart)
+		if leftLength+rightLength == 0 {
+			continue
+		}
+		pick := e.random.Float64() * (leftLength + rightLength)
+		if pick < leftLength {
+			return objectX, targetMin + pick
+		}
+		return objectX, rightStart + pick - leftLength
 	}
-	direction := 1.0
-	if targetX < objectX {
-		direction = -1
+	// A feasible pair at the boundary is still preferable to an overlapping
+	// random draw when the allowed span is extremely small.
+	if targetMax-objectMin >= objectMax-targetMin {
+		return objectMin, targetMax
 	}
-	candidate := objectX + direction*minimumSeparation
-	if candidate < minimumTargetX || candidate > maximumTargetX {
-		candidate = objectX - direction*minimumSeparation
-	}
-	return clamp(candidate, minimumTargetX, maximumTargetX)
+	return objectMax, targetMin
 }
 
 // resetTerrain restores the manually configured terrain and then, for
@@ -500,13 +504,47 @@ func (e *Environment) resetTerrain() {
 	// Config is owned by the caller and must not be mutated by per-episode
 	// terrain randomization.
 	e.config.Terrain = append([]TerrainPoint(nil), e.baseTerrain...)
-	randomization := e.config.Curriculum.Randomization
-	if !randomization.Enabled || e.resetCount == 0 || randomization.TerrainHeightJitter == 0 {
+	// Always perform per-episode terrain randomization to force domain
+	// variability for every Reset(). Use a fixed peak jitter amplitude so
+	// episode-to-episode shapes are visibly distinct on the frontend.
+	// Note: this intentionally ignores Curriculum.Randomization flags.
+	// If the workspace has no terrain points, nothing to mutate.
+	maximumHeight := e.config.Workspace.MaxY - e.config.GripperBodyHeight - e.config.GripperFingerLength - e.config.GripperClearance
+	// Create a more interesting, per-episode hill by selecting a randomized
+	// peak offset and shaping the neighbouring control points. This yields a
+	// randomized peak height and slope transition curve rather than identical
+	// per-point noise across episodes.
+	count := len(e.config.Terrain)
+	if count == 0 {
 		return
 	}
-	maximumHeight := e.config.Workspace.MaxY - e.config.GripperBodyHeight - e.config.GripperFingerLength - e.config.GripperClearance
-	for index := range e.config.Terrain {
-		e.config.Terrain[index].Y = clamp(e.config.Terrain[index].Y+e.symmetricJitter(randomization.TerrainHeightJitter), e.config.Workspace.MinY, maximumHeight)
+	// Pick a peak index near the workspace centre (fallback to mid index).
+	peakIndex := count / 2
+	// Allow the peak position to slide slightly left/right to diversify shapes.
+	if count >= 3 {
+		shift := int(math.Floor(e.random.Float64()*2.0)) - 1
+		peakIndex = peakIndex + shift
+		if peakIndex < 0 {
+			peakIndex = 0
+		}
+		if peakIndex > count-1 {
+			peakIndex = count - 1
+		}
+	}
+	// Force a peak jitter of ±0.3m and choose a random curve sharpness.
+	peakOffset := e.symmetricJitter(0.3)
+	curve := 0.6 + e.random.Float64()*2.2 // larger -> sharper peak
+	for i := range e.config.Terrain {
+		base := e.baseTerrain[i].Y
+		// distance in indices from the peak, normalized to [0,1]
+		d := math.Abs(float64(i-peakIndex)) / math.Max(1.0, float64(count-1))
+		// shaped contribution from the peak offset (decays with distance)
+		shape := peakOffset * math.Pow(1.0-d, curve)
+		// small per-point jitter preserves fine-grained variation
+		jitter := e.symmetricJitter(0.05)
+		candidate := base + shape + jitter
+		// Clamp into workspace-safe vertical range
+		e.config.Terrain[i].Y = clamp(candidate, e.config.Workspace.MinY, maximumHeight)
 	}
 }
 
@@ -568,7 +606,7 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		return State{}, 0, OutcomeRunning, false, err
 	}
 	if e.state.Phase == PhaseSuccess || e.state.Phase == PhaseFailure {
-		return e.state, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
+		return State{}, 0, OutcomeFailure, true, errors.New("force-control episode is terminal; reset before stepping")
 	}
 
 	baseValues := [3]float64{}
@@ -578,6 +616,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 			return State{}, 0, OutcomeRunning, false, fmt.Errorf("fly base action: %w", err)
 		}
 	}
+	// Preserve the legacy diagnostic value when an older caller has no explicit
+	// decomposition. It is never used to select the physical command.
 	residualValues := finalValues
 	if len(residual) > 0 {
 		residualValues, err = e.actionVector(residual)
@@ -585,22 +625,11 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 			return State{}, 0, OutcomeRunning, false, fmt.Errorf("SAC residual action: %w", err)
 		}
 	}
-	selected := finalValues
-	// A caller that supplies only the legacy/final action has no branches to
-	// select. Execute that action in every mode instead of treating a missing
-	// base or residual vector as an all-zero command.
-	decompositionAvailable := len(flyBase) > 0 && len(residual) > 0
-	if decompositionAvailable {
-		switch e.config.EffectiveControlMode() {
-		case ModeBaseOnly, ModeParametricSAC:
-			selected = baseValues
-		case ModePureRL:
-			selected = residualValues
-		case ModeResidual:
-			selected = finalValues
-		}
-	}
-	values, err := e.validatedAction(float32Action(selected))
+	// Python owns policy selection and returns the evaluated actuator command in
+	// the primary action stream. The decomposition streams remain telemetry for
+	// experiment analysis only; the Go process must never select or recombine
+	// them in response to a dashboard control.
+	values, err := e.validatedAction(float32Action(finalValues))
 	if err != nil {
 		return State{}, 0, OutcomeRunning, false, err
 	}
@@ -639,7 +668,6 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	if e.state.GripperVelocityY > 0 {
 		e.verticalAcceleration = math.Max(0, (e.state.GripperVelocityY-previous.GripperVelocityY)/e.config.TimeStep)
 	}
-	e.releaseCommanded = false
 	e.applyGripControl(filteredValues[2])
 	e.lastAppliedAction = filteredValues
 	e.updateGripState()
@@ -668,8 +696,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		e.failureReason, e.state.Phase = terminalReason, PhaseFailure
 		e.updateHomeostasis(terminalReason)
 		rewardAction := filteredValues
-		if mode == ModeResidual {
-			rewardAction = residualValues
+		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
+			rewardAction = finalValues
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		e.lastReward.Penalty += e.failurePenalty(terminalReason)
@@ -680,8 +708,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 	e.updateHomeostasis("")
 	if e.state.Phase == PhaseSuccess {
 		rewardAction := filteredValues
-		if mode == ModeResidual {
-			rewardAction = residualValues
+		if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
+			rewardAction = finalValues
 		}
 		e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 		if !e.successRewardAwarded {
@@ -691,9 +719,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 				e.lastReward.Total += e.lastReward.Contact
 			case CurriculumGrasp:
 				// Legacy direct-force training already receives its attachment
-				// event reward. Residual mode instead keeps that feedback small
-				// and awards this clean terminal grasp milestone after the
-				// configured verified hold.
+				// event reward. The primary-action pipeline still preserves this
+				// task-specific reward distinction for historical checkpoints.
 				if e.config.EffectiveControlMode() == ModeResidual {
 					e.lastReward.Success = e.config.Reward.SuccessfulGripReward
 					e.lastReward.Total += e.lastReward.Success
@@ -718,8 +745,8 @@ func (e *Environment) stepDecomposed(action, flyBase, residual []float32) (State
 		return e.state, e.lastReward.Total, OutcomeSuccess, true, nil
 	}
 	rewardAction := filteredValues
-	if mode == ModeResidual {
-		rewardAction = residualValues
+	if mode == ModeResidual || mode == ModePureRL || mode == ModeParametricSAC {
+		rewardAction = finalValues
 	}
 	e.lastReward = e.rewardWithActions(previous, rewardAction, previousAction)
 	return e.state, e.lastReward.Total, OutcomeRunning, false, nil
@@ -804,7 +831,10 @@ func (e *Environment) filterAction(raw [3]float64) [3]float64 {
 		} else {
 			filtered[index] += e.config.ActionSmoothingAlpha * (value - filtered[index])
 		}
-		if math.Abs(filtered[index]) < e.config.ActionDeadZone {
+		// The raw command has already passed the dead zone. Scale the filtered
+		// threshold by alpha so smoothing does not raise the effective minimum
+		// input from 0.02 to 0.02/alpha on the first movement step.
+		if math.Abs(filtered[index]) < e.config.ActionDeadZone*e.config.ActionSmoothingAlpha {
 			if filtered[index] != 0 {
 				e.filterDeadZoneRemoved[index] = true
 			}
@@ -853,6 +883,14 @@ func (e *Environment) applyGripControl(value float64) {
 	// opens the jaws, and it is rejected while the gripper is still airborne
 	// above the release guide or before the explicit release phase.
 	// A small negative command means "back off a little", not "drop the object".
+	// Once a valid release has opened the jaws, keep them open while the object
+	// settles. Success requires several stable frames, not repeated release
+	// commands on every one of those frames.
+	if e.releaseCommanded {
+		e.state.GripperOpening = 1
+		e.state.GripForce = 0
+		return
+	}
 	if value <= e.config.ReleaseActionThreshold {
 		if e.state.GripperY > e.targetReleaseGuideHeight()+e.config.ReleaseTolerance || math.Abs(e.state.ObjectX-e.state.TargetX) > e.config.TargetWidth/2+e.config.ReleaseTolerance || e.state.Phase != PhaseReleaseObject || !e.objectHorizontallyInsideTarget() {
 			e.state.GripperOpening = 0
@@ -1155,6 +1193,9 @@ func (e *Environment) rewardWithActions(previous State, action, previousAction [
 	// Time cost is always present. Homeostasis is an additional motivation
 	// signal, not a replacement that can make hovering cost-free.
 	breakdown.Penalty = e.config.Reward.TimePenalty
+	// Dense shaping keeps the agent moving toward the object instead of parking
+	// at the ceiling with a near-zero action and collecting idle step penalties.
+	breakdown.Penalty -= 0.5 * gripperObjectDistance(e.state)
 	attached := e.state.Grip.ObjectAttached
 	stage := e.currentCurriculumStage()
 	if e.state.Grip.ContactDetected && !e.state.ContactBonusAwarded {
@@ -1676,7 +1717,11 @@ func (e *Environment) slipSeverity() float64 {
 	return clamp((e.requiredForce()-e.state.GripForce)/e.requiredForce(), 0, 1)
 }
 func (e *Environment) objectInsideTarget() bool {
-	return e.objectHorizontallyInsideTarget() && math.Abs(e.state.ObjectY-e.targetRestHeight()) <= e.config.ReleaseTolerance
+	// The target is a horizontal zone over potentially sloped terrain. An
+	// object resting within that zone sits on the ground at its own X, which
+	// can differ from the ground height sampled at the target's center.
+	localRestHeight := e.terrainHeight(e.state.ObjectX) + e.config.ObjectHeight/2
+	return e.objectHorizontallyInsideTarget() && math.Abs(e.state.ObjectY-localRestHeight) <= e.config.ReleaseTolerance
 }
 func (e *Environment) objectHorizontallyInsideTarget() bool {
 	return math.Abs(e.state.ObjectX-e.state.TargetX) <= e.config.TargetWidth/2

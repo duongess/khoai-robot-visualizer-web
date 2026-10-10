@@ -124,6 +124,9 @@ export interface RuntimeMetrics {
   replay_buffer_size: number;
   training_batches: number;
   policy_version: number;
+	active_model_name?: string;
+	controller_type?: string;
+	checkpoint_name?: string;
 	training_step?: number;
 	total_episodes?: number;
 	actor_loss?: number;
@@ -241,7 +244,16 @@ export interface WorkerState {
   outcome: string;
   latest_vertical_action?: number;
 	episode_policy_version?: number;
+	reflex_parameters?: Array<{
+		name: string;
+		value: number;
+		min_value: number;
+		max_value: number;
+		default_value: number;
+	}>;
 	control?: {
+		command_source?: 'python_evaluated_reflex';
+		model_managed?: boolean;
 		dt: number;
 		carriage_x: number;
 		gripper_y: number;
@@ -309,7 +321,8 @@ export interface SimulationSnapshot {
 
 export interface ChartSample {
   timestamp: number;
-  step: number;
+  episode_id: number;
+  episode_step: number;
   total_steps: number;
   average_reward: number;
   success_rate: number;
